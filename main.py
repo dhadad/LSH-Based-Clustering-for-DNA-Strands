@@ -1,7 +1,8 @@
 import numpy as np
 import time
 import random
-
+import plotly.express as px
+import pandas as pd
 
 # Naive Solution
 
@@ -185,6 +186,19 @@ def lsh_clstering(all_reads, q, k, m, L):
 
         print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
+        acrcy_dict1[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+        acrcy_dict2[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+        acrcy_dict3[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+        acrcy_dict4[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+        acrcy_dict5[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+        acrcy_dict6[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+        acrcy_dict7[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+        print("Accuracy:", acrcy_dict1[itr + 1], acrcy_dict2[itr + 1], acrcy_dict3[itr + 1],
+              acrcy_dict4[itr + 1], acrcy_dict5[itr + 1],
+              acrcy_dict6[itr + 1], acrcy_dict7[itr + 1])
+        time_itr = time.time() - time_start
+        time_itr_dict[itr + 1] = time_itr
+
     return C_til
 
 
@@ -277,15 +291,44 @@ random.shuffle(reads_err)
 
 
 # Test the clustering algorithm
+acrcy_dict1 = {}
+acrcy_dict2 = {}
+acrcy_dict3 = {}
+acrcy_dict4 = {}
+acrcy_dict5 = {}
+acrcy_dict6 = {}
+acrcy_dict7 = {}
 
+time_acrcy_dict = {}
+time_itr_dict = {}
 
-#C_til = lsh_clstering(all_reads=reads_err, q=7, k=5, m=50, L=32)
-C_til = naive_clstring(reads_err)
-acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+C_til = lsh_clstering(all_reads=reads_err, q=7, k=5, m=50, L=32)
+#C_til = naive_clstring(reads_err)
+
+keys = acrcy_dict1.keys()
+values1 = acrcy_dict1.values()
+values2 = acrcy_dict2.values()
+values3 = acrcy_dict3.values()
+values4 = acrcy_dict4.values()
+values5 = acrcy_dict5.values()
+values6 = acrcy_dict6.values()
+values7 = acrcy_dict7.values()
+
+df = pd.DataFrame()
+
+df["keys"] = keys
+df["0.6"]= values1
+df["0.7"]= values2
+df["0.8"]= values3
+df["0.9"]= values4
+df["0.95"]= values5
+df["0.99"]= values6
+df["1.0"]= values7
+
+fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
+fig.show()
+
+keys = time_itr_dict.keys()
+values = time_itr_dict.values()
+
+px.line(x=keys,y=values)
