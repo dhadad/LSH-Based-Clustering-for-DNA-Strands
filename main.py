@@ -88,6 +88,11 @@ def lsh_sig(numset, perms):
     return lsh
 
 
+def jaccard_similarity(numset_1, numset_2):
+    intersection = len(list(set(numset_1).intersection(numset_2)))
+    union = (len(numset_1) + len(numset_2)) - intersection
+    return float(intersection) / union
+
 # The LSH Clustering Algorithm
 
 
@@ -102,7 +107,7 @@ def _numsets(all_reads, q):
     time_start = time.time()
     numsets = {}
     for i in range(len(all_reads)):
-        numsets[i] = seq_numset(all_reads[i], q)
+        numsets[i] = seq_numset(all_reads[i][:70], q)
     print("time to create number set for each sequence: {}".format(time.time() - time_start))
     return numsets
 
@@ -159,11 +164,10 @@ def lsh_clstering(all_reads, q, k, m, L):
         pairs = set()
         sigs = []
         buckets = {}
-        # first, choose random k elements of the LSH signature
-        # then, by giving a weight to each one, their sum will act as the new signature
+        # choose random k elements of the LSH signature
         indexes = random.sample(range(m), k)
         for lsh in lsh_sigs:
-            sig = sum(lsh[indexes[i]] * ((4 ** q) ** i) for i in range(k))
+            sig = tuple(sorted([lsh[indexes[i]] for i in range(k)]))
             sigs.append(sig)
 
         # buckets[sig] = [indexes (from all_reads) of (hopefully) similar sequences]
@@ -178,26 +182,26 @@ def lsh_clstering(all_reads, q, k, m, L):
             if len(elems) <= 1:
                 continue
             for elem in elems[1:]:
-                pairs.add((elems[0], elem))
+                if no_jaccard or jaccard_similarity(numsets[elems[0]], numsets[elem]) >= 0.4:
+                    pairs.add((elems[0], elem))
 
-        # pairs = sorted(list(pairs))
         for pair in pairs:
             _add_pair(pair[0], pair[1], C_til)
 
         print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
-
-        acrcy_dict1[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-        acrcy_dict2[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-        acrcy_dict3[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-        acrcy_dict4[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-        acrcy_dict5[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-        acrcy_dict6[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-        acrcy_dict7[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-        print("Accuracy:", acrcy_dict1[itr + 1], acrcy_dict2[itr + 1], acrcy_dict3[itr + 1],
-              acrcy_dict4[itr + 1], acrcy_dict5[itr + 1],
-              acrcy_dict6[itr + 1], acrcy_dict7[itr + 1])
-        time_itr = time.time() - time_start
-        time_itr_dict[itr + 1] = time_itr
+        if monitor_acry:
+            acrcy_dict1[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+            acrcy_dict2[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+            acrcy_dict3[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+            acrcy_dict4[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+            acrcy_dict5[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+            acrcy_dict6[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+            acrcy_dict7[itr + 1] = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+            print("Accuracy:", acrcy_dict1[itr + 1], acrcy_dict2[itr + 1], acrcy_dict3[itr + 1],
+                  acrcy_dict4[itr + 1], acrcy_dict5[itr + 1],
+                  acrcy_dict6[itr + 1], acrcy_dict7[itr + 1])
+            time_itr = time.time() - time_start
+            time_itr_dict[itr + 1] = time_itr
 
     return C_til
 
@@ -301,34 +305,47 @@ acrcy_dict7 = {}
 
 time_acrcy_dict = {}
 time_itr_dict = {}
-
-C_til = lsh_clstering(all_reads=reads_err, q=7, k=5, m=50, L=32)
+monitor_acry = False
+no_jaccard = True
+begin = time.time()
+C_til = lsh_clstering(all_reads=reads_err, q=7, k=4, m=37, L=128)
 #C_til = naive_clstring(reads_err)
+print("time for the whole process: {}".format(time.time() - begin))
 
-keys = acrcy_dict1.keys()
-values1 = acrcy_dict1.values()
-values2 = acrcy_dict2.values()
-values3 = acrcy_dict3.values()
-values4 = acrcy_dict4.values()
-values5 = acrcy_dict5.values()
-values6 = acrcy_dict6.values()
-values7 = acrcy_dict7.values()
+if monitor_acry:
+    keys = acrcy_dict1.keys()
+    values1 = acrcy_dict1.values()
+    values2 = acrcy_dict2.values()
+    values3 = acrcy_dict3.values()
+    values4 = acrcy_dict4.values()
+    values5 = acrcy_dict5.values()
+    values6 = acrcy_dict6.values()
+    values7 = acrcy_dict7.values()
 
-df = pd.DataFrame()
+    df = pd.DataFrame()
 
-df["keys"] = keys
-df["0.6"]= values1
-df["0.7"]= values2
-df["0.8"]= values3
-df["0.9"]= values4
-df["0.95"]= values5
-df["0.99"]= values6
-df["1.0"]= values7
+    df["keys"] = keys
+    df["0.6"]= values1
+    df["0.7"]= values2
+    df["0.8"]= values3
+    df["0.9"]= values4
+    df["0.95"]= values5
+    df["0.99"]= values6
+    df["1.0"]= values7
 
-fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
-fig.show()
+    fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
+    fig.show()
 
-keys = time_itr_dict.keys()
-values = time_itr_dict.values()
+    keys = time_itr_dict.keys()
+    values = time_itr_dict.values()
 
-px.line(x=keys,y=values)
+    px.line(x=keys, y=values)
+else:
+    acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+    acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+    acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+    acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+    acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+    acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+    acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+    print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
