@@ -144,6 +144,29 @@ def _add_pair(elem_1, elem_2, C_til):
         C_til[elem_2] = []
 
 
+def edit_dis(s1, s2):
+    if not s1 or not s2:
+        return float('inf')
+    m = len(s1) + 1
+    n = len(s2) + 1
+
+    tbl = {}
+    for i in range(m): tbl[i, 0] = i
+    for j in range(n): tbl[0, j] = j
+    for i in range(1, m):
+        for j in range(1, n):
+            cost = 0 if s1[i - 1] == s2[j - 1] else 1
+            tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
+
+    return tbl[i, j]
+
+
+def get_index(seq):
+    if len(seq) < 36:
+        return None
+    return seq[35:max(50, len(seq))]
+
+
 def lsh_clstering(all_reads, q, k, m, L):
     """
     Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
@@ -182,7 +205,9 @@ def lsh_clstering(all_reads, q, k, m, L):
             if len(elems) <= 1:
                 continue
             for elem in elems[1:]:
-                if no_jaccard or jaccard_similarity(numsets[elems[0]], numsets[elem]) >= 0.4:
+                jac = jaccard_similarity(numsets[elems[0]], numsets[elem])
+                if no_jaccard or (jac >= 0.3) or (jac >= 0.25 and edit_dis(all_reads[elems[0]], all_reads[elem]) <= 13):
+                    # or (jac >= 0.05 and edit_dis(get_index(all_reads[elems[0]]), get_index(all_reads[elem])) <= 5):
                     pairs.add((elems[0], elem))
 
         for pair in pairs:
@@ -254,7 +279,7 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
 
 
 reads_cl = []  # the whole input
-with open(r'C:\Users\Adar\Documents\git_repos\yupyter\evyat.txt') as f:
+with open(r'C:\Users\Adar\Documents\git_repos\yupyter\evyat3.txt') as f:
     for line in f:
         reads_cl.append(line.strip())
 cnt = 0
@@ -306,11 +331,11 @@ acrcy_dict7 = {}
 time_acrcy_dict = {}
 time_itr_dict = {}
 monitor_acry = False
-no_jaccard = True
+no_jaccard = False
 begin = time.time()
-C_til = lsh_clstering(all_reads=reads_err, q=7, k=4, m=37, L=128)
+C_til = lsh_clstering(all_reads=reads_err, q=7, k=4, m=40, L=128)
 #C_til = naive_clstring(reads_err)
-print("time for the whole process: {}".format(time.time() - begin))
+print("time for whole process: {}".format(time.time() - begin))
 
 if monitor_acry:
     keys = acrcy_dict1.keys()
