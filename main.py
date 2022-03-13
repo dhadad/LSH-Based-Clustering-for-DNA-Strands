@@ -1,8 +1,10 @@
 import numpy as np
 import time
 import random
+import pickle
 import plotly.express as px
 import pandas as pd
+
 
 # Naive Solution
 
@@ -89,11 +91,39 @@ def lsh_sig(numset, perms):
 
 
 def jaccard_similarity(numset_1, numset_2):
+    '''
+    Approximate the edit distance of two sequences using Jaccard simillarity.
+    :param numset_1, numset_2: two arrays of integers. each one represents one of the sequences we
+        we wish to estimate the distance for. The numbers are the value of the Q-grams which the
+        sequence consists of. They are obtained using '_numsets' function.
+    :return: float, from 0 to 1.
+    '''
     intersection = len(list(set(numset_1).intersection(numset_2)))
     union = (len(numset_1) + len(numset_2)) - intersection
     return float(intersection) / union
 
+
 # The LSH Clustering Algorithm
+
+
+def get_index(seq):
+    ''' Currently using 6 chars index '''
+    return seq[:6]
+
+
+def rep_find(inp, parent):
+    '''
+    Obtain the representative of the cluster a given sequence is related to.
+    In the beginning, for each sequence the "parent" is itself.
+    :param inp: the unique index of the sequence
+    :param parent: the array used for mapping between a sequence's index to it's parent's index.
+    :return: the parent's index.
+    '''
+    temp = inp
+    while parent[temp] != temp:
+        temp = parent[temp]
+    parent[temp] = temp
+    return temp
 
 
 def _numsets(all_reads, q):
@@ -129,22 +159,30 @@ def _lsh_sigs(numsets, m, top):
     return lsh_sigs
 
 
-def _add_pair(elem_1, elem_2, C_til):
+def _add_pair(elem_1, elem_2, C_til, parent):
     """
-    Insert a pair of two sequences indices into C_til. In case both didn't appeared yet, we'll
-    treat the first one as the center of the possible cluster.
+    "Adding a pair" is interpreted as merging the clusters of the two sequences given. If both are in
+    the same cluster already, no effect. Otherwise: the union of the two clusters will have as its "center"
+    the minimal parent's index of the two input sequences.
     :param elem_1, elem_2: the indices of two sequences in all_reads.
     :param C_til: array of clusters. In the form of C_til[rep] = [reads assigned to the cluster]
+    :param parent: the array used for mapping between a sequence's index to it's parent's index.
     """
-    if len(C_til[elem_2]) > 1 >= len(C_til[elem_1]):
-        C_til[elem_2].extend(C_til[elem_1])
-        C_til[elem_1] = []
-    else:
-        C_til[elem_1].extend(C_til[elem_2])
-        C_til[elem_2] = []
+    p1 = rep_find(elem_1, parent)
+    p2 = rep_find(elem_2, parent)
+    if p1 != p2:
+        center = min(p1, p2)
+        merged = max(p1, p2)
+        C_til[center].extend(C_til[merged])
+        C_til[merged] = []
+        parent[merged] = center
 
 
 def edit_dis(s1, s2):
+    """
+    Fully calculate the edit distance between two sequences. O(n^2).
+    :param s1, s2: the two strings to get the distance between.
+    """
     if not s1 or not s2:
         return float('inf')
     m = len(s1) + 1
@@ -159,12 +197,6 @@ def edit_dis(s1, s2):
             tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
 
     return tbl[i, j]
-
-
-def get_index(seq):
-    if len(seq) < 36:
-        return None
-    return seq[35:max(50, len(seq))]
 
 
 def lsh_clstering(all_reads, q, k, m, L):
@@ -182,6 +214,15 @@ def lsh_clstering(all_reads, q, k, m, L):
     numsets = _numsets(all_reads, q)
     lsh_sigs = _lsh_sigs(numsets, m, 4 ** q)
     C_til = {i: [i] for i in range(len(all_reads))}
+    parent = [i for i in range(len(all_reads))]
+
+    # the pickle has a dict with the edit distance between all the possible ACGT sequences of length 6
+    # about 223MB, 8 sec to load.
+    load_time = time.time()
+    with open(r'C:\Users\Adar\PycharmProjects\dna_cluster\indexes6_edit_dis.pickle', 'rb') as f:
+        dists = pickle.load(f)
+    print("done loading distances dict: {}".format(time.time() - load_time))
+
     for itr in range(L):
         time_start = time.time()
         pairs = set()
@@ -190,7 +231,8 @@ def lsh_clstering(all_reads, q, k, m, L):
         # choose random k elements of the LSH signature
         indexes = random.sample(range(m), k)
         for lsh in lsh_sigs:
-            sig = tuple(sorted([lsh[indexes[i]] for i in range(k)]))
+            # represent the sig as a single integer
+            sig = sum(int(lsh[indexes[i]]) * ((4 ** q) ** i) for i in range(k))
             sigs.append(sig)
 
         # buckets[sig] = [indexes (from all_reads) of (hopefully) similar sequences]
@@ -206,12 +248,12 @@ def lsh_clstering(all_reads, q, k, m, L):
                 continue
             for elem in elems[1:]:
                 jac = jaccard_similarity(numsets[elems[0]], numsets[elem])
-                if no_jaccard or (jac >= 0.3) or (jac >= 0.25 and edit_dis(all_reads[elems[0]], all_reads[elem]) <= 13):
-                    # or (jac >= 0.05 and edit_dis(get_index(all_reads[elems[0]]), get_index(all_reads[elem])) <= 5):
+                if jac >= 0.38 or (jac >= 0.22 and (get_index(all_reads[elem]) == get_index(all_reads[elems[0]]) or
+                                                    dists[(get_index(all_reads[elem]), get_index(all_reads[elems[0]]))] <= 3)):
                     pairs.add((elems[0], elem))
 
         for pair in pairs:
-            _add_pair(pair[0], pair[1], C_til)
+            _add_pair(pair[0], pair[1], C_til, parent)
 
         print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
         if monitor_acry:
@@ -268,7 +310,7 @@ def comp_clstrs(alg_clstr, org_clstr, gamma, reads_err):
 
 def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
     acrcy = 0
-    for i in range(0, len(clustering)):
+    for i in clustering.keys():
         if len(clustering[i]) >= 1:
             acrcy += comp_clstrs(clustering[i],
                                  C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
@@ -279,7 +321,9 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
 
 
 reads_cl = []  # the whole input
-with open(r'C:\Users\Adar\Documents\git_repos\yupyter\evyat3.txt') as f:
+dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\600withindex6\evyat.txt'
+with open(dataset) as f:
+    print("using dataset: {}".format(dataset))
     for line in f:
         reads_cl.append(line.strip())
 cnt = 0
@@ -318,7 +362,6 @@ for i in range(0, len(C_reps)):
     reads_err[i] = C_reps[i][0]
 random.shuffle(reads_err)
 
-
 # Test the clustering algorithm
 acrcy_dict1 = {}
 acrcy_dict2 = {}
@@ -333,8 +376,8 @@ time_itr_dict = {}
 monitor_acry = False
 no_jaccard = False
 begin = time.time()
-C_til = lsh_clstering(all_reads=reads_err, q=7, k=4, m=40, L=128)
-#C_til = naive_clstring(reads_err)
+C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=32)
+# C_til = naive_clstring(reads_err)
 print("time for whole process: {}".format(time.time() - begin))
 
 if monitor_acry:
@@ -350,13 +393,13 @@ if monitor_acry:
     df = pd.DataFrame()
 
     df["keys"] = keys
-    df["0.6"]= values1
-    df["0.7"]= values2
-    df["0.8"]= values3
-    df["0.9"]= values4
-    df["0.95"]= values5
-    df["0.99"]= values6
-    df["1.0"]= values7
+    df["0.6"] = values1
+    df["0.7"] = values2
+    df["0.8"] = values3
+    df["0.9"] = values4
+    df["0.95"] = values5
+    df["0.99"] = values6
+    df["1.0"] = values7
 
     fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
     fig.show()
