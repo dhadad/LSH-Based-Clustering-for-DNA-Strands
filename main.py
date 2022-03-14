@@ -107,8 +107,8 @@ def jaccard_similarity(numset_1, numset_2):
 
 
 def get_index(seq):
-    ''' Currently using 6 chars index '''
-    return seq[:6]
+    ''' Currently using 11 chars index '''
+    return seq[:11]
 
 
 def rep_find(inp, parent):
@@ -178,28 +178,35 @@ def _add_pair(elem_1, elem_2, C_til, parent):
         parent[merged] = center
 
 
-def edit_dis(s1, s2):
-    """
-    Fully calculate the edit distance between two sequences. O(n^2).
-    :param s1, s2: the two strings to get the distance between.
-    """
-    if not s1 or not s2:
-        return float('inf')
-    m = len(s1) + 1
-    n = len(s2) + 1
+class EditDis:
+    def __init__(self):
+        self.d = dict()
 
-    tbl = {}
-    for i in range(m): tbl[i, 0] = i
-    for j in range(n): tbl[0, j] = j
-    for i in range(1, m):
-        for j in range(1, n):
-            cost = 0 if s1[i - 1] == s2[j - 1] else 1
-            tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
+    def calc(self, s1, s2):
+        """
+        Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
+        :param s1, s2: the two strings to get the distance between.
+        """
+        if not s1 or not s2:
+            return float('inf')
+        if (s1, s2) in self.d:
+            return self.d[(s1, s2)]
+        elif (s2, s1) in self.d:
+            return self.d[(s2, s1)]
+        tbl = {}
+        for i in range(len(s1) + 1):
+            tbl[i, 0] = i
+        for j in range(len(s2) + 1):
+            tbl[0, j] = j
+        for i in range(1, len(s1) + 1):
+            for j in range(1, len(s2) + 1):
+                cost = 0 if s1[i - 1] == s2[j - 1] else 1
+                tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
+        self.d[(s1, s2)] = tbl[i, j]
+        return tbl[i, j]
 
-    return tbl[i, j]
 
-
-def lsh_clstering(all_reads, q, k, m, L):
+def lsh_clstering(all_reads, q, k, m, L, rand_subs=True):
     """
     Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
     signature for each, and finally iterate L times looking for matching pairs, to be inserted to the
@@ -209,27 +216,29 @@ def lsh_clstering(all_reads, q, k, m, L):
     :param q: length of the divided sub-sequences (Q-grams)
     :param k: number of MH signatures in a LSH signature
     :param L: number of iterations of the algorithm
+    :param rand_subs: determine whether the sub arrays (of the num sets) used for creating an LSH
+        signature in each iteration will consist of adjacent items or random ones.
+        The original article suggest the random option.
+        if False is given, it's recommended to choose L s.t: k * L = m
     :return C_til, dict of clusters. In the form of C_til[rep] = [reads assigned to the cluster]
     """
     numsets = _numsets(all_reads, q)
     lsh_sigs = _lsh_sigs(numsets, m, 4 ** q)
     C_til = {i: [i] for i in range(len(all_reads))}
     parent = [i for i in range(len(all_reads))]
-
-    # the pickle has a dict with the edit distance between all the possible ACGT sequences of length 6
-    # about 223MB, 8 sec to load.
-    load_time = time.time()
-    with open(r'C:\Users\Adar\PycharmProjects\dna_cluster\indexes6_edit_dis.pickle', 'rb') as f:
-        dists = pickle.load(f)
-    print("done loading distances dict: {}".format(time.time() - load_time))
+    dis = EditDis()
 
     for itr in range(L):
         time_start = time.time()
         pairs = set()
         sigs = []
         buckets = {}
+
         # choose random k elements of the LSH signature
-        indexes = random.sample(range(m), k)
+        if rand_subs:
+            indexes = random.sample(range(m), k)
+        else:
+            indexes = [num for num in range(k * itr, k * itr + k)]
         for lsh in lsh_sigs:
             # represent the sig as a single integer
             sig = sum(int(lsh[indexes[i]]) * ((4 ** q) ** i) for i in range(k))
@@ -248,8 +257,8 @@ def lsh_clstering(all_reads, q, k, m, L):
                 continue
             for elem in elems[1:]:
                 jac = jaccard_similarity(numsets[elems[0]], numsets[elem])
-                if jac >= 0.38 or (jac >= 0.22 and (get_index(all_reads[elem]) == get_index(all_reads[elems[0]]) or
-                                                    dists[(get_index(all_reads[elem]), get_index(all_reads[elems[0]]))] <= 3)):
+                if jac >= 0.38 or (jac >= 0.22 and
+                                   dis.calc(get_index(all_reads[elem]), get_index(all_reads[elems[0]])) <= 3):
                     pairs.add((elems[0], elem))
 
         for pair in pairs:
@@ -321,7 +330,7 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
 
 
 reads_cl = []  # the whole input
-dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\600withindex6\evyat.txt'
+dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\500\evyat.txt'
 with open(dataset) as f:
     print("using dataset: {}".format(dataset))
     for line in f:
@@ -377,8 +386,14 @@ monitor_acry = False
 no_jaccard = False
 begin = time.time()
 C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=32)
+#C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=16, rand_subs=False)
 # C_til = naive_clstring(reads_err)
 print("time for whole process: {}".format(time.time() - begin))
+
+# info regarding the num of single sequences, in contrast to bigger clusters
+clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
+singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
 
 if monitor_acry:
     keys = acrcy_dict1.keys()
