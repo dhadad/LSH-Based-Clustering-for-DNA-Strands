@@ -1,7 +1,6 @@
 import numpy as np
 import time
 import random
-import pickle
 import plotly.express as px
 import pandas as pd
 
@@ -178,6 +177,27 @@ def _add_pair(elem_1, elem_2, C_til, parent):
         parent[merged] = center
 
 
+class Score:
+    def __init__(self, n):
+        if n <= 0:
+            raise Exception("Invalid number of items")
+        self.seen = dict()
+        self.values = [0 for _ in range(n)]
+
+    def update(self, elem_1, elem_2):
+        """
+        Update the score of the elements we are about to assaign to the same cluster.
+        :param elem_1, elem_2: the indices of two sequences in all_reads.
+        :param scores: array of positive integers, with the grade we give to each sequence. higher it is,
+            higher the chance we'll choose it to represent the cluster.
+        """
+        if (elem_1, elem_2) in self.seen or (elem_2, elem_1) in self.seen:
+            return
+        self.values[elem_1] += 1
+        self.values[elem_2] += 1
+        self.seen[(elem_1, elem_2)] = True
+
+
 class EditDis:
     def __init__(self):
         self.d = dict()
@@ -206,7 +226,7 @@ class EditDis:
         return tbl[i, j]
 
 
-def lsh_clstering(all_reads, q, k, m, L, rand_subs=True):
+def lsh_clstering(all_reads, q, k, m, L, rand_subs=True, relable=False):
     """
     Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
     signature for each, and finally iterate L times looking for matching pairs, to be inserted to the
@@ -220,12 +240,15 @@ def lsh_clstering(all_reads, q, k, m, L, rand_subs=True):
         signature in each iteration will consist of adjacent items or random ones.
         The original article suggest the random option.
         if False is given, it's recommended to choose L s.t: k * L = m
+    :param relable: final pass through all the single sequences, trying to assign them to one of the
+        clusters created in the ealier stage.
     :return C_til, dict of clusters. In the form of C_til[rep] = [reads assigned to the cluster]
     """
     numsets = _numsets(all_reads, q)
     lsh_sigs = _lsh_sigs(numsets, m, 4 ** q)
     C_til = {i: [i] for i in range(len(all_reads))}
     parent = [i for i in range(len(all_reads))]
+    sc = Score(len(all_reads))
     dis = EditDis()
 
     for itr in range(L):
@@ -263,6 +286,7 @@ def lsh_clstering(all_reads, q, k, m, L, rand_subs=True):
 
         for pair in pairs:
             _add_pair(pair[0], pair[1], C_til, parent)
+            sc.update(pair[0], pair[1])
 
         print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
         if monitor_acry:
