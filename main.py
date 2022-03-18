@@ -4,40 +4,12 @@ import random
 import plotly.express as px
 import pandas as pd
 from functools import cached_property
+import multiprocessing as mp
+from array import array
 
 # Global Constants
-DEFAULT_SCORE = 0
 INDEX_LEN = 11
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
-
-# Naive Solution
-
-
-def naive_clstring(all_reads, n=14):
-    """
-    Attempt to split the sequences to clusters via a trivial method: use the first n characters
-    in a sequence as an index, then decide two sequences match based on this prefix being equal
-    or not.
-    :param all_reads: the whole input, in the form of an array of strings
-    :param n: integer, the prefix length to be looked at as a key for the clustering
-    :return C_til, dict of clusters. In the form of C_til[rep] = [reads assigned to the cluster]
-    """
-    time_start = time.time()
-    prefix_to_ind = {}
-    for i in range(len(all_reads)):
-        if all_reads[i][:n] in prefix_to_ind:
-            prefix_to_ind[all_reads[i][:n]].append(i)
-        else:
-            prefix_to_ind[all_reads[i][:n]] = [i]
-
-    C_til = {i: [i] for i in range(len(all_reads))}
-    for indexes in prefix_to_ind.values():
-        C_til[indexes[0]] = indexes
-
-    print("time for naive approach: {}".format(time.time() - time_start))
-    return C_til
-
-# The LSH Clustering Algorithm
 
 
 def cache_symmetric(func):
@@ -76,6 +48,7 @@ def edit_dis(s1, s2):
             tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
     return tbl[i, j]
 
+
 class LSHCluster:
     def __init__(self, all_reads, q, k, m, L, rand_subs=True):
         """
@@ -105,9 +78,9 @@ class LSHCluster:
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
         # array for tracking the sequence with the highest score in the cluster
-        self.max_score = [(idx, DEFAULT_SCORE) for idx in range(len(all_reads))]
+        self.max_score = [(idx, 0) for idx in range(len(all_reads))]
 
-        # mapping between a seq's index to it's parent's index
+        # mapping between a sequence's index to it's parent's index
         self.parent = [idx for idx in range(len(all_reads))]
 
     class Score:
@@ -121,7 +94,7 @@ class LSHCluster:
             if n <= 0:
                 raise ValueError("Invalid number of items")
             self.seen = dict()
-            self.values = [DEFAULT_SCORE for _ in range(n)]
+            self.values = [0 for _ in range(n)]
 
         def update(self, elem_1, elem_2):
             """
@@ -149,13 +122,20 @@ class LSHCluster:
         """
         Obtain the representative of the cluster a given sequence is related to.
         In the beginning, for each sequence the "parent" is itself.
+        Not using cache as values can be updated as the algorithm progress.
+        In addition, updates the items in the path from 'inp' to its topmost ancestor, in order to achieve
+        amortized complexity of log*(n) when getting the parent of an element.
         :param inp: the unique index of the sequence
         :return: the parent's index.
         """
         temp = inp
+        path = [inp]
         while self.parent[temp] != temp:
             temp = self.parent[temp]
-        self.parent[temp] = temp
+            path.append(temp)
+        # update parent for items in path:
+        for idx in path:
+            self.parent[idx] = temp
         return temp
 
     @staticmethod
@@ -183,6 +163,27 @@ class LSHCluster:
         union = (len(numset_1) + len(numset_2)) - intersection
         return float(intersection) / union
 
+    @staticmethod
+    def qgram_distance(numset_1, numset_2):
+        """
+        Approximate the edit distance of two sequences using Q-gram distance.
+        :param numset_1, numset_2: two arrays of integers. each one represents one of the sequences we
+            we wish to estimate the distance for. The numbers are the value of the Q-grams which the
+            sequence consists of. They are obtained using '_numsets' function.
+        :return: float, from 0 to 1.
+        """
+        union = set()
+        for k in numset_1:
+            union.add(k)
+        for k in numset_2:
+            union.add(k)
+        dis = 0
+        for k in union:
+            val_1 = k if k in numset_1 else 0
+            val_2 = k if k in numset_2 else 0
+            dis += abs(val_1 - val_2)
+        return dis
+
     def seq_numset(self, idx):
         """
         Convert a sequence into a set of numbers
@@ -196,18 +197,6 @@ class LSHCluster:
         return arr
 
     @staticmethod
-    def mh_sig(numset, perm):
-        """
-        Obtain a MH signature for a sequence, based on given representation of it as a number set
-        the given permutation and the definition for MH signature in the article
-        :param numset: array of integers, each one is a Q-gram value (so its length is the
-            original sequence's length minus q)
-        :param perm: array, permutation of {0,..., 4**q}
-        :return: MH signature in the form of a single integer
-        """
-        return min([perm[num] for num in numset])
-
-    @staticmethod
     def lsh_sig(numset, perms):
         """
         Obtain a LSH signature for a sequence, converted to its representation as a set of numbers
@@ -219,7 +208,7 @@ class LSHCluster:
         """
         lsh = []
         for perm in perms:
-            lsh.append(LSHCluster.mh_sig(numset, perm))
+            lsh.append(min([perm[num] for num in numset]))  # append a MH signature
         return lsh
 
     @cached_property
@@ -247,7 +236,7 @@ class LSHCluster:
         # generate m permutations
         perms = [np.random.permutation(self.top) for _ in range(self.m)]
         # LSH signature tuple (size m, instead of k, as the original paper suggests) for each sequence
-        res = [LSHCluster.lsh_sig(numsets[idx], perms) for idx in range(len(self.numsets))]
+        res = [LSHCluster.lsh_sig(numsets[idx], perms) for idx in range(len(numsets))]
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
         return res
 
@@ -272,7 +261,7 @@ class LSHCluster:
             # update max_score:
             if self.max_score[center][1] < self.max_score[merged][1]:
                 self.max_score[center] = self.max_score[merged]
-                self.max_score[merged] = None
+                self.max_score[merged] = tuple()
 
     def run(self):
         """
@@ -291,9 +280,10 @@ class LSHCluster:
                 indexes = random.sample(range(self.m), self.k)
             else:
                 indexes = [num for num in range(self.k * itr, self.k * itr + self.k)]
-            for lsh in self.lsh_sigs:
+            for idx in range(len(self.all_reads)):
                 # represent the sig as a single integer
-                sig = sum(int(lsh[indexes[i]]) * (self.top ** i) for i in range(self.k))
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
+                # sigs.append((self.index(self.all_reads[idx]), sig))
                 sigs.append(sig)
 
             # buckets[sig] = [indexes (from all_reads) of (hopefully) similar sequences]
@@ -309,7 +299,8 @@ class LSHCluster:
                     continue
                 for elem in elems[1:]:
                     jac = LSHCluster.jaccard_similarity(self.numsets[elems[0]], self.numsets[elem])
-                    if jac >= 0.38 or (jac >= 0.22 and
+                    # q_dis = LSHCluster.qgram_distance(self.numsets[elems[0]], self.numsets[elem])
+                    if jac >= 0.38 or (jac >= 0.25 and
                        edit_dis(LSHCluster.index(self.all_reads[elem]), LSHCluster.index(self.all_reads[elems[0]])) <= 3):
                         pairs.add((elems[0], elem))
 
@@ -318,43 +309,115 @@ class LSHCluster:
                 self._add_pair(pair[0], pair[1])
 
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
-            if monitor_acry:
-                acrcy_dict1[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-                acrcy_dict2[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-                acrcy_dict3[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-                acrcy_dict4[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-                acrcy_dict5[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-                acrcy_dict6[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-                acrcy_dict7[itr + 1] = calc_acrcy(self.C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-                print("Accuracy:", acrcy_dict1[itr + 1], acrcy_dict2[itr + 1], acrcy_dict3[itr + 1],
-                      acrcy_dict4[itr + 1], acrcy_dict5[itr + 1],
-                      acrcy_dict6[itr + 1], acrcy_dict7[itr + 1])
-                time_itr = time.time() - time_start
-                time_itr_dict[itr + 1] = time_itr
-
         return self.C_til
 
-    def relable(self, take_first=True):
+    def index_clstring(self):
+        """
+        Clustering based on the sequences' index only. Kind of a naive approach to the problem. Recommended only
+        as part of a full algorithm and not as a single step.
+        """
+        time_start = time.time()
+        pairs = set()
+        buckets = {}
+
+        for idx in range(len(self.all_reads)):
+            if LSHCluster.index(self.all_reads[idx]) in buckets:
+                buckets[LSHCluster.index(self.all_reads[idx])].append(idx)
+            else:
+                buckets[LSHCluster.index(self.all_reads[idx])] = [idx]
+
+        # from each bucket we'll keep pairs. the first element will be announced as center
+        for elems in buckets.values():
+            if len(elems) <= 1:
+                continue
+            for elem in elems[1:]:
+                jac = LSHCluster.jaccard_similarity(self.numsets[elems[0]], self.numsets[elem])
+                # q_dis = LSHCluster.qgram_distance(self.numsets[elems[0]], self.numsets[elem])
+                if jac >= 0.3:
+                    pairs.add((elems[0], elem))
+
+        for pair in pairs:
+            self.sc.update(pair[0], pair[1])
+            self._add_pair(pair[0], pair[1])
+
+        print("time for index based approach: {}".format(time.time() - time_start))
+        return self.C_til
+
+    def relable(self, multi=False):
         """
         Used AFTER we executed 'run'. The purpose is to handle single sequences (meaning, clusters of size 1).
         We'll iterate over those sequences, and look for the cluster whose most highly ranked sequence is similar to
         that single sequence.
-        :param take_first: Boolean. if True: we'll take for a single sequence the first cluster to seem similar
-            enough. if False: we'll iteratre through all the clusters, and choose the best option.
+        :param multi: determine whether to use multiprocessing.
         :return: the updated C_til
         """
-        clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
+        time_start = time.time()
         singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
-        for single in singles:
-            for rep in clstr_reps:
-                # get the index of the sequence with the highest score (from the current cluster)
-                best = self.max_score[rep][0]
-                jac = LSHCluster.jaccard_similarity(self.numsets[single], self.numsets[best])
-                if jac >= 0.38 or (jac >= 0.22 and
-                   edit_dis(LSHCluster.index(self.all_reads[single]), LSHCluster.index(self.all_reads[best])) <= 3):
-                    self._add_pair(single, best)
+        if len(singles) == 0:
+            return self.C_til
+        clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
+        if multi:
+            with mp.Pool(mp.cpu_count()-1) as pool:
+                matches = [pool.apply_async(self.relable_single, args=(single, clstr_reps, ))
+                           for single in singles]
+                pool.close()
+                pool.join()
+                matches = [match.get() for match in matches]
+        else:
+            matches = [self.relable_single(single, clstr_reps) for single in singles]
+        for idx in range(len(singles)):
+            if matches[idx] is not None:
+                self._add_pair(matches[idx], singles[idx])
+        print("time for relabeling step: {}".format(time.time() - time_start))
         return self.C_til
 
+    def relable_single(self, single, clstr_reps):
+        """
+        Does the relabeling of a single sequence. To be used separetely for each unique single sequence.
+        :param single: the index of the single sequence we wish to find a cluster for.
+        :param clstr_reps: array of the representatives of the clusters having more than 1 element.=
+        :return the representative of the cluster to have the given single sequence inserted to.
+            if no suitable cluster is to be found, None will be returned.
+        """
+        for rep in clstr_reps:
+            # get the index of the sequence with the highest score (from the current cluster)
+            best = self.max_score[rep][0]
+            jac = LSHCluster.jaccard_similarity(self.numsets[single], self.numsets[best])
+            # q_dis = LSHCluster.qgram_distance(self.numsets[single], self.numsets[best])
+            if jac >= 0.2:
+                return rep
+        return None
+
+    def common_substr_step(self, w=3, r=4, repeats=3):
+        """
+        Step of clustering the sequences using a sub string shared by several sequences. Will be done via getting a
+        random permutation of size 'w', then looking for it inside the input sequences. If exists, we will use a
+        subs string of size 'r' starting with it. Otherwise, a prefix of size 'l' will be used instead.
+        :param w: size for the permutation we will search for inside the sequences.
+        :param r: the size of common sub string.
+        :param repeats: number of iterations, as it's an iterative algorithm.
+        :return: the updated C_til
+        """
+        def cmn_substr(x, a, w, l):
+            ind = x.find(a)
+            if ind == -1:
+                ind = 0
+            return x[ind:min(len(x), ind + w + l)]
+        time_start = time.time()
+        for _ in range(repeats):
+            a = ''.join(random.choice('ACGT') for _ in range(w))
+            common_substr_hash = [0] * len(self.all_reads)
+            for idx in range(len(self.all_reads)):
+                common_substr_hash[idx] = (idx, cmn_substr(self.all_reads[idx], a, w, r))
+            common_substr_hash.sort(key=lambda x: x[1])
+            for idx in range(len(common_substr_hash) - 1):
+                if common_substr_hash[idx][1] == common_substr_hash[idx + 1][1]:
+                    jac = LSHCluster.jaccard_similarity(self.numsets[common_substr_hash[idx][0]],
+                                                        self.numsets[common_substr_hash[idx + 1][0]])
+                    if jac >= 0.32:
+                        self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0])
+        print("common substr step took: {}".format(time.time() - time_start))
+        return self.C_til
 
 # Accuracy Calculation
 
@@ -402,107 +465,134 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
 
 # Reading The Data
 
+if __name__ == '__main__':
+    reads_cl = []  # the whole input
+    dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\500\evyat.txt'
+    # dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\evyat.txt'
+    with open(dataset) as f:
+        print("using dataset: {}".format(dataset))
+        for line in f:
+            reads_cl.append(line.strip())
+    cnt = 0
+    reads = []  # representatives
+    for i in range(0, len(reads_cl)):
+        if reads_cl[i] != "":
+            if reads_cl[i][0] == "*":
+                cnt += 1
+                rep = reads_cl[i - 1]
+                reads.append(rep)
 
-reads_cl = []  # the whole input
-dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\500\evyat.txt'
-with open(dataset) as f:
-    print("using dataset: {}".format(dataset))
-    for line in f:
-        reads_cl.append(line.strip())
-cnt = 0
-reads = []  # representatives
-for i in range(0, len(reads_cl)):
-    if reads_cl[i] != "":
-        if reads_cl[i][0] == "*":
-            cnt += 1
-            rep = reads_cl[i - 1]
-            reads.append(rep)
+    '''
+    Construct the setup for a run.
+    C_reps = [(Read, Cluster rep of the cluster to which the read belongs to)]
+    C_dict = {Cluster rep: All the Reads that belong to that cluster}
+    '''
+    C_reps = []
+    C_dict = {}
+    rep = reads_cl[0]
+    for i in range(1, len(reads_cl)):
+        if reads_cl[i] != "":
+            if reads_cl[i][0] == "*":
+                if len(C_reps) > 0:
+                    # the last sequence is to be placed in a different cluster
+                    C_dict[rep].pop()
+                    C_reps.pop()
+                rep = reads_cl[i - 1]
+                C_dict[rep] = []
+            else:
+                C_dict[rep].append(reads_cl[i])
+                C_reps.append((reads_cl[i], rep))
+    C_reps.sort(key=lambda x: x[0])
 
-'''
-Construct the setup for a run.
-C_reps = [(Read, Cluster rep of the cluster to which the read belongs to)]
-C_dict = {Cluster rep: All the Reads that belong to that cluster}
-'''
-C_reps = []
-C_dict = {}
-rep = reads_cl[0]
-for i in range(1, len(reads_cl)):
-    if reads_cl[i] != "":
-        if reads_cl[i][0] == "*":
-            if len(C_reps) > 0:
-                # the last sequence is to be placed in a different cluster
-                C_dict[rep].pop()
-                C_reps.pop()
-            rep = reads_cl[i - 1]
-            C_dict[rep] = []
-        else:
-            C_dict[rep].append(reads_cl[i])
-            C_reps.append((reads_cl[i], rep))
-C_reps.sort(key=lambda x: x[0])
+    reads_err = [0] * (len(C_reps))
+    for i in range(0, len(C_reps)):
+        reads_err[i] = C_reps[i][0]
+    random.shuffle(reads_err)
 
-reads_err = [0] * (len(C_reps))
-for i in range(0, len(C_reps)):
-    reads_err[i] = C_reps[i][0]
-random.shuffle(reads_err)
+    # Test the clustering algorithm
+    acrcy_dict1 = {}
+    acrcy_dict2 = {}
+    acrcy_dict3 = {}
+    acrcy_dict4 = {}
+    acrcy_dict5 = {}
+    acrcy_dict6 = {}
+    acrcy_dict7 = {}
 
-# Test the clustering algorithm
-acrcy_dict1 = {}
-acrcy_dict2 = {}
-acrcy_dict3 = {}
-acrcy_dict4 = {}
-acrcy_dict5 = {}
-acrcy_dict6 = {}
-acrcy_dict7 = {}
+    time_acrcy_dict = {}
+    time_itr_dict = {}
+    monitor_acry = False
+    begin = time.time()
+    lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32)
+    C_til = lsh.run()
+    # C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=16, rand_subs=False)
+    # C_til = naive_clstring(reads_err)
+    print("time for whole process: {}".format(time.time() - begin))
 
-time_acrcy_dict = {}
-time_itr_dict = {}
-monitor_acry = False
-begin = time.time()
-lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32)
-C_til = lsh.run()
-# C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=16, rand_subs=False)
-# C_til = naive_clstring(reads_err)
-print("time for whole process: {}".format(time.time() - begin))
+    # info regarding the num of single sequences, in contrast to bigger clusters
 
-# info regarding the num of single sequences, in contrast to bigger clusters
-clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
-singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
-print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
+    if monitor_acry:
+        keys = acrcy_dict1.keys()
+        values1 = acrcy_dict1.values()
+        values2 = acrcy_dict2.values()
+        values3 = acrcy_dict3.values()
+        values4 = acrcy_dict4.values()
+        values5 = acrcy_dict5.values()
+        values6 = acrcy_dict6.values()
+        values7 = acrcy_dict7.values()
 
-if monitor_acry:
-    keys = acrcy_dict1.keys()
-    values1 = acrcy_dict1.values()
-    values2 = acrcy_dict2.values()
-    values3 = acrcy_dict3.values()
-    values4 = acrcy_dict4.values()
-    values5 = acrcy_dict5.values()
-    values6 = acrcy_dict6.values()
-    values7 = acrcy_dict7.values()
+        df = pd.DataFrame()
 
-    df = pd.DataFrame()
+        df["keys"] = keys
+        df["0.6"] = values1
+        df["0.7"] = values2
+        df["0.8"] = values3
+        df["0.9"] = values4
+        df["0.95"] = values5
+        df["0.99"] = values6
+        df["1.0"] = values7
 
-    df["keys"] = keys
-    df["0.6"] = values1
-    df["0.7"] = values2
-    df["0.8"] = values3
-    df["0.9"] = values4
-    df["0.95"] = values5
-    df["0.99"] = values6
-    df["1.0"] = values7
+        fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
+        fig.show()
 
-    fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
-    fig.show()
+        keys = time_itr_dict.keys()
+        values = time_itr_dict.values()
 
-    keys = time_itr_dict.keys()
-    values = time_itr_dict.values()
-
-    px.line(x=keys, y=values)
-else:
-    acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-    acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-    acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-    acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-    acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-    acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-    acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-    print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+        px.line(x=keys, y=values)
+    else:
+        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
+        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
+        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+        print("Relabeling 1:")
+        C_til = lsh.relable()
+        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
+        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
+        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+        print("Extra index step:")
+        C_til = lsh.index_clstring()
+        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
+        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
+        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
