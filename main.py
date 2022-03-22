@@ -5,11 +5,35 @@ import plotly.express as px
 import pandas as pd
 from functools import cached_property
 import multiprocessing as mp
+from collections import Counter
 from array import array
 
 # Global Constants
 INDEX_LEN = 11
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
+NUM_HEIGHEST = 4
+
+
+def relable_single(single, clstr_reps, numsets, max_score, all_reads):
+    """
+    Does the relabeling of a single sequence. To be used separetely for each unique single sequence.
+    :param single: the index of the single sequence we wish to find a cluster for.
+    :param clstr_reps: array of the representatives of the clusters having more than 1 element.=
+    :return the representative of the cluster to have the given single sequence inserted to.
+        if no suitable cluster is to be found, None will be returned.
+    """
+    for rep in clstr_reps:
+        # get the index of the sequence with the highest score (from the current cluster)
+        print("single: {}, rep: {}".format(single, rep))
+        best = max_score[rep][0]
+        sd = LSHCluster.sorensen_dice(numsets[single], numsets[best])
+        if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(all_reads[single]),
+                                                  LSHCluster.index(all_reads[best])) <= 3):
+            # q.put(rep)
+            return rep
+    # q.put(None)
+    return None
+
 
 # Naive Solution
 
@@ -38,6 +62,7 @@ def naive_clstring(all_reads, n=14):
     print("time for naive approach: {}".format(time.time() - time_start))
     return C_til
 
+
 # The LSH Clustering Algorithm
 
 
@@ -47,6 +72,7 @@ def cache_symmetric(func):
     (The difference from functools' @cache is in being able to notice also the symmetric version of the key).
     """
     cache = dict()
+
     def outer_func(s1, s2):
         if (s1, s2) in cache:
             return cache[(s1, s2)]
@@ -55,6 +81,7 @@ def cache_symmetric(func):
             cache[(s1, s2)] = result
             cache[(s2, s1)] = result
             return result
+
     return outer_func
 
 
@@ -102,13 +129,12 @@ class LSHCluster:
         self.top = 4 ** q
         self.rand_subs = rand_subs
         self.sc = LSHCluster.Score(len(all_reads))
-        self.matched_once = dict()
 
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
-        # array for tracking the sequence with the highest score in the cluster
-        self.max_score = [(idx, 0) for idx in range(len(all_reads))]
+        # array for tracking the sequences with the highest score in the cluster
+        self.max_score = [[(idx, 0)] for idx in range(len(all_reads))]
 
         # mapping between a sequence's index to it's parent's index
         self.parent = [idx for idx in range(len(all_reads))]
@@ -128,7 +154,7 @@ class LSHCluster:
 
         def update(self, elem_1, elem_2):
             """
-            Update the score of the elements we are about to assaign to the same cluster.
+            Update the score of the elements we are about to assign to the same cluster.
             :param elem_1, elem_2: the indices of two sequences in all_reads.
             :param scores: array of positive integers, with the grade we give to each sequence. higher it is,
                 higher the chance we'll choose it to represent the cluster.
@@ -194,38 +220,24 @@ class LSHCluster:
         return float(intersection) / union
 
     @staticmethod
-    def sorensen_dice(numset_1, numset_2):
+    def sorensen_dice(numset_1, numset_2, bag=False):
         """
         Approximate the edit distance of two sequences using Sorensen-Dice.
         :param numset_1, numset_2: two arrays of integers. each one represents one of the sequences we
             we wish to estimate the distance for. The numbers are the value of the Q-grams which the
             sequence consists of. They are obtained using '_numsets' function.
+        :param bag: boolean. if True, we'll use bag semantics (allow duplicates). otherwise, we won't pay
+            attention to the number of appearances of each item.
         :return: float, from 0 to 1.
         """
-        set_1, set_2 = set(numset_1), set(numset_2)
-        intersection = len(set_1.intersection(set_2))
-        return 2 * float(intersection) / (len(set_1) + len(set_2))
-
-    @staticmethod
-    def qgram_distance(numset_1, numset_2):
-        """
-        Approximate the edit distance of two sequences using Q-gram distance.
-        :param numset_1, numset_2: two arrays of integers. each one represents one of the sequences we
-            we wish to estimate the distance for. The numbers are the value of the Q-grams which the
-            sequence consists of. They are obtained using '_numsets' function.
-        :return: float, from 0 to 1.
-        """
-        union = set()
-        for k in numset_1:
-            union.add(k)
-        for k in numset_2:
-            union.add(k)
-        dis = 0
-        for k in union:
-            val_1 = k if k in numset_1 else 0
-            val_2 = k if k in numset_2 else 0
-            dis += abs(val_1 - val_2)
-        return dis
+        if not bag:
+            set_1, set_2 = set(numset_1), set(numset_2)
+            intersection = len(set_1.intersection(set_2))
+            return 2 * float(intersection) / (len(set_1) + len(set_2))
+        else:
+            bag_1, bag_2 = Counter(numset_1), Counter(numset_2)
+            intersection = len(list((bag_1 & bag_2).elements()))
+            return 2 * float(intersection) / (len(numset_1) + len(numset_2))
 
     def seq_numset(self, idx):
         """
@@ -283,11 +295,12 @@ class LSHCluster:
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
         return res
 
-    def _add_pair(self, elem_1, elem_2):
+    def _add_pair(self, elem_1, elem_2, update_maxscore=True):
         """
         "Adding a pair" is interpreted as merging the clusters of the two sequences given. If both are in
         the same cluster already, no effect. Otherwise: the union of the two clusters will have as its "center"
         the minimal parent's index of the two input sequences.
+        Also, the function is in charge of updating the 'max_score' struct.
         :param elem_1, elem_2: the indices of two sequences in all_reads.
         """
         p1 = self.rep_find(elem_1)
@@ -302,9 +315,25 @@ class LSHCluster:
             self.parent[merged] = center
 
             # update max_score:
-            if self.max_score[center][1] < self.max_score[merged][1]:
-                self.max_score[center] = self.max_score[merged]
-                self.max_score[merged] = tuple()
+            if not update_maxscore:
+                return
+            both_max_score = self.max_score[center] + self.max_score[merged]  # two lists
+            found_1, found_2 = False, False
+            for j in range(len(both_max_score)):
+                if both_max_score[j][0] == elem_1:
+                    both_max_score[j] = (elem_1, self.sc.values[elem_1])
+                    found_1 = True
+                elif both_max_score[j][0] == elem_2:
+                    both_max_score[j] = (elem_2, self.sc.values[elem_2])
+                    found_2 = True
+            if not found_1:
+                both_max_score.append((elem_1, self.sc.values[elem_1]))
+            if not found_2:
+                both_max_score.append((elem_2, self.sc.values[elem_2]))
+
+            both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:NUM_HEIGHEST]
+            self.max_score[merged] = [tuple()]
+            self.max_score[center] = both_max_score
 
     def run(self):
         """
@@ -376,7 +405,7 @@ class LSHCluster:
             for elem in elems[1:]:
                 sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
                 if sd >= 0.42 or (sd >= 0.36 and edit_dis(LSHCluster.index(self.all_reads[elem]),
-                                                         LSHCluster.index(self.all_reads[elems[0]])) <= 3):
+                                                          LSHCluster.index(self.all_reads[elems[0]])) <= 3):
                     pairs.add((elems[0], elem))
 
         for pair in pairs:
@@ -386,80 +415,80 @@ class LSHCluster:
         print("time for index based approach: {}".format(time.time() - time_start))
         return self.C_til
 
-    def relable(self, multi=False):
+    def relable(self, r=0, multi=False):
         """
         Used AFTER we executed 'run'. The purpose is to handle single sequences (meaning, clusters of size 1).
         We'll iterate over those sequences, and look for the cluster whose most highly ranked sequence is similar to
         that single sequence.
+        :param r: 0 for the using the sequence with the highest score to represent a cluster. 1 for the second highest,
+            and so on. if the cluster is smaller than 'r', we won't use it.
         :param multi: determine whether to use multiprocessing.
         :return: the updated C_til
         """
         time_start = time.time()
         singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
-        if len(singles) == 0:
-            return self.C_til
+        if len(singles) == 0: return self.C_til
         clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
-        if multi:
-            with mp.Pool(mp.cpu_count()-1) as pool:
-                matches = [pool.apply_async(self.relable_single, args=(single, clstr_reps, ))
-                           for single in singles]
-                pool.close()
-                pool.join()
-                matches = [match.get() for match in matches]
-        else:
-            matches = [self.relable_single(single, clstr_reps) for single in singles]
-        for idx in range(len(singles)):
-            if matches[idx] is not None:
-                self._add_pair(matches[idx], singles[idx])
+        for single in singles:
+            for rep in clstr_reps:
+                # get the index of the sequence with the highest score (from the current cluster)
+                if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
+                    best = self.max_score[rep][r][0]
+                    sd = LSHCluster.sorensen_dice(self.numsets[single], self.numsets[best])
+                    if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[single]),
+                                                              LSHCluster.index(self.all_reads[best])) <= 3):
+                        self._add_pair(single, rep)
         print("time for relabeling step: {}".format(time.time() - time_start))
         return self.C_til
 
-    def relable_single(self, single, clstr_reps):
-        """
-        Does the relabeling of a single sequence. To be used separetely for each unique single sequence.
-        :param single: the index of the single sequence we wish to find a cluster for.
-        :param clstr_reps: array of the representatives of the clusters having more than 1 element.=
-        :return the representative of the cluster to have the given single sequence inserted to.
-            if no suitable cluster is to be found, None will be returned.
-        """
-        for rep in clstr_reps:
-            # get the index of the sequence with the highest score (from the current cluster)
-            best = self.max_score[rep][0]
-            sd = LSHCluster.sorensen_dice(self.numsets[single], self.numsets[best])
-            if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[single]), LSHCluster.index(self.all_reads[best])) <= 3):
-                return rep
-        return None
-
-    def common_substr_step(self, w=3, r=4, repeats=3):
+    def common_substr_step(self, w=3, t=4, repeats=100):
         """
         Step of clustering the sequences using a sub string shared by several sequences. Will be done via getting a
         random permutation of size 'w', then looking for it inside the input sequences. If exists, we will use a
-        subs string of size 'r' starting with it. Otherwise, a prefix of size 'l' will be used instead.
+        subs string of size 't' starting with it. Otherwise, a prefix of size 't' will be used instead.
         :param w: size for the permutation we will search for inside the sequences.
-        :param r: the size of common sub string.
+        :param t: the size of common sub string.
         :param repeats: number of iterations, as it's an iterative algorithm.
         :return: the updated C_til
         """
-        def cmn_substr(x, a, w, l):
+
+        def cmn_substr(x, a, w, t):
             ind = x.find(a)
             if ind == -1:
                 ind = 0
-            return x[ind:min(len(x), ind + w + l)]
+            return x[ind:min(len(x), ind + w + t)]
+
+        def choose():
+            options = [num for num in range(NUM_HEIGHEST)]
+            weights = (16, 8, 6, 4)
+            return random.choices(options, weights=weights, k=1)[0]
+
         time_start = time.time()
-        for _ in range(repeats):
+        for itr in range(repeats):
+            print("itr: %s" % itr)
+            r = choose()
             a = ''.join(random.choice('ACGT') for _ in range(w))
-            common_substr_hash = [0] * len(self.all_reads)
-            for idx in range(len(self.all_reads)):
-                common_substr_hash[idx] = (idx, cmn_substr(self.all_reads[idx], a, w, r))
+            common_substr_hash = [(0, "")] * len(self.all_reads)
+
+            # for idx in range(len(self.all_reads)):
+            singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+            if len(singles) == 0: return self.C_til
+            clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
+            for idx in singles + [self.max_score[rep][r][0] for rep in clstr_reps if r < len(self.max_score[rep])]:
+                common_substr_hash[idx] = (idx, cmn_substr(self.all_reads[idx], a, w, t))
             common_substr_hash.sort(key=lambda x: x[1])
+
             for idx in range(len(common_substr_hash) - 1):
-                if common_substr_hash[idx][1] == common_substr_hash[idx + 1][1]:
-                    jac = LSHCluster.jaccard_similarity(self.numsets[common_substr_hash[idx][0]],
-                                                        self.numsets[common_substr_hash[idx + 1][0]])
-                    if jac >= 0.32:
+                if common_substr_hash[idx] is None:
+                    continue
+                elif common_substr_hash[idx][1] == common_substr_hash[idx + 1][1]:
+                    sd = LSHCluster.sorensen_dice(self.numsets[common_substr_hash[idx][0]], self.numsets[common_substr_hash[idx + 1][0]])
+                    if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[common_substr_hash[idx][0]]),
+                                                              LSHCluster.index(self.all_reads[common_substr_hash[idx + 1][0]])) <= 3):
                         self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0])
         print("common substr step took: {}".format(time.time() - time_start))
         return self.C_til
+
 
 # Accuracy Calculation
 
@@ -509,7 +538,7 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []  # the whole input
-    dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\500\evyat.txt'
+    dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\3000\evyat.txt'
     # dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\evyat.txt'
     with open(dataset) as f:
         print("using dataset: {}".format(dataset))
@@ -565,7 +594,7 @@ if __name__ == '__main__':
     monitor_acry = False
     begin = time.time()
     lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32)
-    #C_til = lsh.index_clstring()
+    # C_til = lsh.index_clstring()
     C_til = lsh.run()
     # C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=16, rand_subs=False)
     # C_til = naive_clstring(reads_err)
@@ -613,19 +642,20 @@ if __name__ == '__main__':
         acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
         acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
         print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
-        print("Relabeling 1:")
-        C_til = lsh.relable()
-        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
-        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
-        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
-        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+        for r in range(NUM_HEIGHEST):
+            print("Relabeling %s:" % r)
+            C_til = lsh.relable(r=r)
+            clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
+            singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+            print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
+            acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+            acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+            acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+            acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+            acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+            acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+            acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+            print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
         '''
         print("Extra attempt for clustering:")
         C_til = lsh.common_substr_step()
@@ -641,8 +671,10 @@ if __name__ == '__main__':
         acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
         print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
         '''
-        print("Extra index step:")
-        C_til = lsh.index_clstring()
+        # print("Extra index step:")
+        print("Extra onecore step:")
+        C_til = lsh.common_substr_step()
+        # C_til = lsh.index_clstring()
         clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
         singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
         print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
