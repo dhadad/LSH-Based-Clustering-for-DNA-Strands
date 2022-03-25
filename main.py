@@ -11,57 +11,7 @@ from array import array
 # Global Constants
 INDEX_LEN = 11
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
-NUM_HEIGHEST = 4
-
-
-def relable_single(single, clstr_reps, numsets, max_score, all_reads):
-    """
-    Does the relabeling of a single sequence. To be used separetely for each unique single sequence.
-    :param single: the index of the single sequence we wish to find a cluster for.
-    :param clstr_reps: array of the representatives of the clusters having more than 1 element.=
-    :return the representative of the cluster to have the given single sequence inserted to.
-        if no suitable cluster is to be found, None will be returned.
-    """
-    for rep in clstr_reps:
-        # get the index of the sequence with the highest score (from the current cluster)
-        print("single: {}, rep: {}".format(single, rep))
-        best = max_score[rep][0]
-        sd = LSHCluster.sorensen_dice(numsets[single], numsets[best])
-        if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(all_reads[single]),
-                                                  LSHCluster.index(all_reads[best])) <= 3):
-            # q.put(rep)
-            return rep
-    # q.put(None)
-    return None
-
-
-# Naive Solution
-
-
-def naive_clstring(all_reads, n=14):
-    """
-    Attempt to split the sequences to clusters via a trivial method: use the first n characters
-    in a sequence as an index, then decide two sequences match based on this prefix being equal
-    or not.
-    :param all_reads: the whole input, in the form of an array of strings
-    :param n: integer, the prefix length to be looked at as a key for the clustering
-    :return C_til, dict of clusters. In the form of C_til[rep] = [reads assigned to the cluster]
-    """
-    time_start = time.time()
-    prefix_to_ind = {}
-    for i in range(len(all_reads)):
-        if all_reads[i][:n] in prefix_to_ind:
-            prefix_to_ind[all_reads[i][:n]].append(i)
-        else:
-            prefix_to_ind[all_reads[i][:n]] = [i]
-
-    C_til = {i: [i] for i in range(len(all_reads))}
-    for indexes in prefix_to_ind.values():
-        C_til[indexes[0]] = indexes
-
-    print("time for naive approach: {}".format(time.time() - time_start))
-    return C_til
-
+NUM_HEIGHEST = 10
 
 # The LSH Clustering Algorithm
 
@@ -371,7 +321,7 @@ class LSHCluster:
                     continue
                 for elem in elems[1:]:
                     sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
-                    if sd >= 0.4 or (sd >= 0.28 and edit_dis(LSHCluster.index(self.all_reads[elem]),
+                    if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[elem]),
                                                              LSHCluster.index(self.all_reads[elems[0]])) <= 3):
                         pairs.add((elems[0], elem))
 
@@ -465,7 +415,6 @@ class LSHCluster:
 
         time_start = time.time()
         for itr in range(repeats):
-            print("itr: %s" % itr)
             r = choose()
             a = ''.join(random.choice('ACGT') for _ in range(w))
             common_substr_hash = [(0, "")] * len(self.all_reads)
@@ -594,10 +543,7 @@ if __name__ == '__main__':
     monitor_acry = False
     begin = time.time()
     lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32)
-    # C_til = lsh.index_clstring()
     C_til = lsh.run()
-    # C_til = lsh_clstering(all_reads=reads_err, q=6, k=3, m=50, L=16, rand_subs=False)
-    # C_til = naive_clstring(reads_err)
     print("time for whole process: {}".format(time.time() - begin))
 
     # info regarding the num of single sequences, in contrast to bigger clusters
@@ -656,33 +602,4 @@ if __name__ == '__main__':
             acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
             acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
             print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
-        '''
-        print("Extra attempt for clustering:")
-        C_til = lsh.common_substr_step()
-        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
-        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
-        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
-        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
-        '''
-        # print("Extra index step:")
-        print("Extra onecore step:")
-        C_til = lsh.common_substr_step()
-        # C_til = lsh.index_clstring()
-        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
-        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
-        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
-        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
-        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
-        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
-        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
-        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
-        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
-        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
-        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+            print("*************************************************************")
