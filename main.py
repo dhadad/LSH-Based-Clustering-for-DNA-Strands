@@ -11,7 +11,9 @@ from array import array
 # Global Constants
 INDEX_LEN = 11
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
-NUM_HEIGHEST = 10
+NUM_HEIGHEST = 15
+NORMAL_CLSTR_SIZE = 140
+ADJ_DIFF_FACTOR = 26
 
 # The LSH Clustering Algorithm
 
@@ -285,11 +287,20 @@ class LSHCluster:
             self.max_score[merged] = [tuple()]
             self.max_score[center] = both_max_score
 
+    def update_maxscore(self, rep):
+        """
+        Re-calculate the 'max_score' value for a single given cluster.
+        :param rep: the cluster's representative's index.
+        """
+        clstr_sc = [(seq_ind, self.sc.values[seq_ind]) for seq_ind in self.C_til[rep]]
+        self.max_score[rep] = sorted(clstr_sc, reverse=True, key=lambda x: x[1])[:NUM_HEIGHEST]
+
     def run(self):
         """
         Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
         signature for each, and finally iterate L times looking for matching pairs, to be inserted to the
         same cluster.
+        :return: the updated C_til
         """
         for itr in range(self.L):
             time_start = time.time()
@@ -331,6 +342,74 @@ class LSHCluster:
 
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
+        return self.C_til
+
+    def splitter(self, split_singles=False, update_maxscore=True):
+        """
+        The method's aim is to go through all the clusters and to split clusters where it is highly likely we
+        merged two true clusters into one.
+        To be used only after self.run() finished executing.
+        :param update_maxscore: boolean, determine whether to update the self.max_score structure. There's no point
+            suffering from the overhead if the splitter will be used a last step in the algorithm. Otherwise, you'd
+            probably want the self.max_score to store the real values, for having self._add_pair() working properly.
+        :return: the updated C_til
+        """
+        print("Splitter:")
+        tot = time.time()
+        cnt = 0
+        for rep in self.C_til.keys():
+            if len(self.C_til[rep]) < 3:
+                continue
+            # arrange the sequences according to their score, sorted
+            best = self.max_score[rep][0][0]
+            axis = [(seq_ind, self.sorensen_dice(self.numsets[best], self.numsets[seq_ind]))
+                    for seq_ind in C_til[rep] if seq_ind != best]
+            axis.sort(key=lambda x: x[1])
+
+            # detect if the axis consist of two separate groups
+            avg_diff = float(0)
+            for ind in range(len(axis) - 1):
+                avg_diff += axis[ind + 1][1] - axis[ind][1]
+            avg_diff /= (len(axis) - 1)
+            print("avg diff: {}".format(avg_diff))
+            max_diff, ind_max_diff = 0, -1
+            for ind in range(len(axis) - 1):
+                cur_diff = axis[ind + 1][1] - axis[ind][1]
+                if cur_diff > max_diff:
+                    max_diff = cur_diff
+                    ind_max_diff = ind
+            print("max diff = {}".format(max_diff))
+            if ind_max_diff == -1 or (not split_singles and (ind_max_diff == 0 or ind_max_diff == len(axis) - 2)):
+                print("wanted to split a single. avoid")
+                continue
+
+            # splitting
+            if max_diff > ADJ_DIFF_FACTOR * avg_diff and len(C_til[rep]) >= NORMAL_CLSTR_SIZE:
+
+                # FOR DEBUG: learn about the cluster we split:
+                org_clstr = C_dict[rep_in_C(reads_err[self.C_til[rep][0]], C_reps)]
+                alg_clstr = C_til[rep]
+                print("     cmp failed! clstr too big. len alg_clstr = {}, len org clstr = {}".format(len(alg_clstr), len(org_clstr)))
+                for a in alg_clstr:
+                    if reads_err[a] not in org_clstr:
+                        print("     len: {}".format(len(C_dict[rep_in_C(reads_err[a], C_reps)])))
+
+                cnt += 1
+                clstr_1 = [axis[ind][0] for ind in range(ind_max_diff + 1)]
+                clstr_2 = [axis[ind][0] for ind in range(ind_max_diff + 1, len(axis))]
+                if rep in clstr_1:
+                    C_til[rep] = clstr_1
+                    C_til[clstr_2[0]] = clstr_2
+                    other_rep = clstr_2[0]
+                else:
+                    C_til[rep] = clstr_2
+                    C_til[clstr_1[0]] = clstr_1
+                    other_rep = clstr_1[0]
+                if update_maxscore:
+                    self.update_maxscore(rep)
+                    self.update_maxscore(other_rep)
+
+        print("Total time for splitting {} clusters: {}".format(cnt, time.time() - tot))
         return self.C_til
 
     def index_clstring(self):
@@ -385,13 +464,13 @@ class LSHCluster:
                 if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                     best = self.max_score[rep][r][0]
                     sd = LSHCluster.sorensen_dice(self.numsets[single], self.numsets[best])
-                    if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[single]),
+                    if sd >= 0.31 or (sd >= 0.28 and edit_dis(LSHCluster.index(self.all_reads[single]),
                                                               LSHCluster.index(self.all_reads[best])) <= 3):
                         self._add_pair(single, rep)
         print("time for relabeling step: {}".format(time.time() - time_start))
         return self.C_til
 
-    def common_substr_step(self, w=3, t=4, repeats=100):
+    def common_substr_step(self, w=3, t=4, repeats=220):
         """
         Step of clustering the sequences using a sub string shared by several sequences. Will be done via getting a
         random permutation of size 'w', then looking for it inside the input sequences. If exists, we will use a
@@ -408,33 +487,25 @@ class LSHCluster:
                 ind = 0
             return x[ind:min(len(x), ind + w + t)]
 
-        def choose():
-            options = [num for num in range(NUM_HEIGHEST)]
-            weights = (16, 8, 6, 4)
-            return random.choices(options, weights=weights, k=1)[0]
-
         time_start = time.time()
+        singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+        if len(singles) == 0: return self.C_til
         for itr in range(repeats):
-            r = choose()
+            print("itr: %s" % itr)
             a = ''.join(random.choice('ACGT') for _ in range(w))
-            common_substr_hash = [(0, "")] * len(self.all_reads)
-
-            # for idx in range(len(self.all_reads)):
-            singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
-            if len(singles) == 0: return self.C_til
-            clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
-            for idx in singles + [self.max_score[rep][r][0] for rep in clstr_reps if r < len(self.max_score[rep])]:
-                common_substr_hash[idx] = (idx, cmn_substr(self.all_reads[idx], a, w, t))
+            common_substr_hash = []
+            for idx in singles:
+                common_substr_hash.append((idx, cmn_substr(self.all_reads[idx], a, w, t)))
             common_substr_hash.sort(key=lambda x: x[1])
 
             for idx in range(len(common_substr_hash) - 1):
                 if common_substr_hash[idx] is None:
                     continue
                 elif common_substr_hash[idx][1] == common_substr_hash[idx + 1][1]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[common_substr_hash[idx][0]], self.numsets[common_substr_hash[idx + 1][0]])
-                    if sd >= 0.31 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[common_substr_hash[idx][0]]),
-                                                              LSHCluster.index(self.all_reads[common_substr_hash[idx + 1][0]])) <= 3):
-                        self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0])
+                    sd = LSHCluster.sorensen_dice(self.numsets[common_substr_hash[idx][0]],
+                                                  self.numsets[common_substr_hash[idx + 1][0]])
+                    if sd >= 0.15:
+                        self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0], update_maxscore=False)
         print("common substr step took: {}".format(time.time() - time_start))
         return self.C_til
 
@@ -456,7 +527,17 @@ def rep_in_C(read, C_reps):
     return -1
 
 
-def comp_clstrs(alg_clstr, org_clstr, gamma, reads_err):
+def find_size_in_mine(str, clustering, reads_err):
+    for i in clustering.keys():
+        if reads_err[i] == str:
+            return len(clustering[i])
+        for j in clustering[i]:
+            if reads_err[j] == str:
+                return len(clustering[i])
+    return 0
+
+
+def comp_clstrs(alg_clstr, org_clstr, gamma, reads_err, clustering):
     num_exist = 0
     if len(alg_clstr) > len(org_clstr):
         return 0
@@ -479,16 +560,15 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
     for i in clustering.keys():
         if len(clustering[i]) >= 1:
             acrcy += comp_clstrs(clustering[i],
-                                 C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
+                                 C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err, clustering)
     return acrcy
 
-
 # Reading The Data
+
 
 if __name__ == '__main__':
     reads_cl = []  # the whole input
     dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\3000\evyat.txt'
-    # dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\evyat.txt'
     with open(dataset) as f:
         print("using dataset: {}".format(dataset))
         for line in f:
@@ -544,7 +624,7 @@ if __name__ == '__main__':
     begin = time.time()
     lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32)
     C_til = lsh.run()
-    print("time for whole process: {}".format(time.time() - begin))
+    print("time for base process: {}".format(time.time() - begin))
 
     # info regarding the num of single sequences, in contrast to bigger clusters
 
@@ -588,6 +668,7 @@ if __name__ == '__main__':
         acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
         acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
         print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+        print("*************************************************************")
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
             C_til = lsh.relable(r=r)
@@ -603,3 +684,17 @@ if __name__ == '__main__':
             acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
             print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
             print("*************************************************************")
+        print("Splitting clusters:")
+        C_til = lsh.splitter()
+        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
+        singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+        print("num of clsts bigger than 1: {}, num of single seqs: {}".format(len(clstrs), len(singles)))
+        acrcy1 = calc_acrcy(C_til, C_dict, C_reps, 0.6, reads_err) / len(reads)
+        acrcy2 = calc_acrcy(C_til, C_dict, C_reps, 0.7, reads_err) / len(reads)
+        acrcy3 = calc_acrcy(C_til, C_dict, C_reps, 0.8, reads_err) / len(reads)
+        acrcy4 = calc_acrcy(C_til, C_dict, C_reps, 0.9, reads_err) / len(reads)
+        acrcy5 = calc_acrcy(C_til, C_dict, C_reps, 0.95, reads_err) / len(reads)
+        acrcy6 = calc_acrcy(C_til, C_dict, C_reps, 0.99, reads_err) / len(reads)
+        acrcy7 = calc_acrcy(C_til, C_dict, C_reps, 1, reads_err) / len(reads)
+        print("Accuracy:", acrcy1, acrcy2, acrcy3, acrcy4, acrcy5, acrcy6, acrcy7)
+        print("*************************************************************")
