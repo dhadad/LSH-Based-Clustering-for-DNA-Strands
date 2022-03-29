@@ -6,55 +6,36 @@ import pandas as pd
 from functools import cached_property
 import multiprocessing as mp
 from collections import Counter
-from array import array
 
 # Global Constants
 INDEX_LEN = 11
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
-NUM_HEIGHEST = 15
+NUM_HEIGHEST = 4
 NORMAL_CLSTR_SIZE = 140
 ADJ_DIFF_FACTOR = 26
 
 # The LSH Clustering Algorithm
 
 
-def cache_symmetric(func):
+def symmetric(func):
     """
-    The decorator is to be used when we wish to avoid recalculating values already seen.
-    (The difference from functools' @cache is in being able to notice also the symmetric version of the key).
+    The decorator is to be used when arguments order doesn't have a significance.
     """
-    cache = dict()
-
     def outer_func(s1, s2):
-        if (s1, s2) in cache:
-            return cache[(s1, s2)]
-        else:
-            result = func(s1, s2)
-            cache[(s1, s2)] = result
-            cache[(s2, s1)] = result
-            return result
-
+        l = min(s1, s2)
+        r = s1 if s1 == l else s2
+        return func(l, r)
     return outer_func
 
 
-@cache_symmetric
+@cache
+@symmetric
 def edit_dis(s1, s2):
     """
     Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
     :param s1, s2: the two strings to get the distance between.
     """
-    if not s1 or not s2:
-        return float('inf')
-    tbl = {}
-    for i in range(len(s1) + 1):
-        tbl[i, 0] = i
-    for j in range(len(s2) + 1):
-        tbl[0, j] = j
-    for i in range(1, len(s1) + 1):
-        for j in range(1, len(s2) + 1):
-            cost = 0 if s1[i - 1] == s2[j - 1] else 1
-            tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
-    return tbl[i, j]
+    return Levenshtein.distance(s1, s2)
 
 
 class LSHCluster:
