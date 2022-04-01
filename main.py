@@ -3,16 +3,18 @@ import time
 import random
 import plotly.express as px
 import pandas as pd
-from functools import cached_property
+from functools import cached_property, cache
 import multiprocessing as mp
 from collections import Counter
+import Levenshtein
 
 # Global Constants
+
 INDEX_LEN = 11
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 NUM_HEIGHEST = 4
 NORMAL_CLSTR_SIZE = 140
-ADJ_DIFF_FACTOR = 26
+ADJ_DIFF_FACTOR = 15
 
 # The LSH Clustering Algorithm
 
@@ -22,9 +24,7 @@ def symmetric(func):
     The decorator is to be used when arguments order doesn't have a significance.
     """
     def outer_func(s1, s2):
-        l = min(s1, s2)
-        r = s1 if s1 == l else s2
-        return func(l, r)
+        return func(min(s1, s2), max(s1, s2))
     return outer_func
 
 
@@ -39,7 +39,7 @@ def edit_dis(s1, s2):
 
 
 class LSHCluster:
-    def __init__(self, all_reads, q, k, m, L, rand_subs=True):
+    def __init__(self, all_reads, q, k, m, L, rand_subs=True, debug=False):
         """
         Initiate an object dedicated for clustering the DNA sequences in 'all_reads'.
         The function just makes ready the necessary data structures. For the starting the clustering
@@ -62,7 +62,7 @@ class LSHCluster:
         self.top = 4 ** q
         self.rand_subs = rand_subs
         self.sc = LSHCluster.Score(len(all_reads))
-
+        self.debug = debug
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
@@ -239,6 +239,18 @@ class LSHCluster:
         p1 = self.rep_find(elem_1)
         p2 = self.rep_find(elem_2)
         if p1 != p2:
+
+            if self.debug:
+                real_rep1 = rep_in_C(reads_err[elem_1], C_reps)
+                real_rep2 = rep_in_C(reads_err[elem_2], C_reps)
+                org_clstr = C_dict[real_rep1]
+                if reads_err[elem_2] not in org_clstr:
+                    print("wrong merge {} {}.\nseq1: {}\nseq2: {}\nreal_rep 1: {}\nreal_rep 2: {}\n"
+                          "numset 1: {}\nnumset 2:{}\nfull sig 1:{}\nfull sig 2:{}\n************\n"
+                          .format(min(elem_1, elem_2), max(elem_1, elem_2), self.all_reads[elem_1], 
+                                  self.all_reads[elem_2], real_rep1, real_rep2,
+                                  self.numsets[elem_1], self.numsets[elem_2],
+                                  sorted(self.lsh_sigs[elem_1]), sorted(self.lsh_sigs[elem_2])))
             # update clusters:
             center, merged = min(p1, p2), max(p1, p2)
             self.C_til[center].extend(self.C_til[merged])
@@ -318,6 +330,11 @@ class LSHCluster:
                         pairs.add((elems[0], elem))
 
             for pair in pairs:
+                if self.debug:
+                    print("tried merge {} {}. sigs: {} {}"
+                          .format(min(pair[0], pair[1]), max(pair[0], pair[1]),
+                                  tuple(sorted([self.lsh_sigs[pair[0]][indexes[a]] for a in range(self.k)])),
+                                  tuple(sorted([self.lsh_sigs[pair[1]][indexes[a]] for a in range(self.k)]))))
                 self.sc.update(pair[0], pair[1])
                 self._add_pair(pair[0], pair[1])
 
@@ -335,7 +352,6 @@ class LSHCluster:
             probably want the self.max_score to store the real values, for having self._add_pair() working properly.
         :return: the updated C_til
         """
-        print("Splitter:")
         tot = time.time()
         cnt = 0
         for rep in self.C_til.keys():
@@ -367,13 +383,13 @@ class LSHCluster:
             # splitting
             if max_diff > ADJ_DIFF_FACTOR * avg_diff and len(C_til[rep]) >= NORMAL_CLSTR_SIZE:
 
-                # FOR DEBUG: learn about the cluster we split:
-                org_clstr = C_dict[rep_in_C(reads_err[self.C_til[rep][0]], C_reps)]
-                alg_clstr = C_til[rep]
-                print("     cmp failed! clstr too big. len alg_clstr = {}, len org clstr = {}".format(len(alg_clstr), len(org_clstr)))
-                for a in alg_clstr:
-                    if reads_err[a] not in org_clstr:
-                        print("     len: {}".format(len(C_dict[rep_in_C(reads_err[a], C_reps)])))
+                if self.debug:
+                    org_clstr = C_dict[rep_in_C(reads_err[self.C_til[rep][0]], C_reps)]
+                    alg_clstr = C_til[rep]
+                    print("comitted split. len alg_clstr = {}, len org clstr = {}".format(len(alg_clstr), len(org_clstr)))
+                    for a in alg_clstr:
+                        if reads_err[a] not in org_clstr:
+                            print("len: {}".format(len(C_dict[rep_in_C(reads_err[a], C_reps)])))
 
                 cnt += 1
                 clstr_1 = [axis[ind][0] for ind in range(ind_max_diff + 1)]
@@ -518,9 +534,16 @@ def find_size_in_mine(str, clustering, reads_err):
     return 0
 
 
-def comp_clstrs(alg_clstr, org_clstr, gamma, reads_err, clustering):
+def comp_clstrs(alg_clstr, org_clstr, gamma, reads_err):
     num_exist = 0
     if len(alg_clstr) > len(org_clstr):
+        if debug and int(gamma) == 1:
+            print("cmp failed! clstr too big. len alg_clstr = {}, len org clstr = {}"
+                  .format(len(alg_clstr), len(org_clstr)))
+            for a in alg_clstr:
+                if reads_err[a] not in org_clstr:
+                    print("len: {}, numsets: {}, {}".format(len(C_dict[rep_in_C(reads_err[a], C_reps)]), 
+                                                            lsh.numsets[a], lsh.numsets[alg_clstr[0]]))
         return 0
     for i in range(0, len(alg_clstr)):
         flg_exist = 0
@@ -541,7 +564,7 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
     for i in clustering.keys():
         if len(clustering[i]) >= 1:
             acrcy += comp_clstrs(clustering[i],
-                                 C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err, clustering)
+                                 C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
     return acrcy
 
 # Reading The Data
@@ -549,7 +572,7 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []  # the whole input
-    dataset = r'C:\Users\Adar\Documents\git_repos\yupyter\index11\3000\evyat.txt'
+    dataset = r"C:\Users\Adar\Documents\git_repos\DNASimulator\dnaSimulator\files\minion_idt\evyat.txt"
     with open(dataset) as f:
         print("using dataset: {}".format(dataset))
         for line in f:
@@ -562,7 +585,7 @@ if __name__ == '__main__':
                 cnt += 1
                 rep = reads_cl[i - 1]
                 reads.append(rep)
-
+    
     '''
     Construct the setup for a run.
     C_reps = [(Read, Cluster rep of the cluster to which the read belongs to)]
@@ -584,12 +607,12 @@ if __name__ == '__main__':
                 C_dict[rep].append(reads_cl[i])
                 C_reps.append((reads_cl[i], rep))
     C_reps.sort(key=lambda x: x[0])
-
+    
     reads_err = [0] * (len(C_reps))
     for i in range(0, len(C_reps)):
         reads_err[i] = C_reps[i][0]
     random.shuffle(reads_err)
-
+    
     # Test the clustering algorithm
     acrcy_dict1 = {}
     acrcy_dict2 = {}
@@ -598,17 +621,16 @@ if __name__ == '__main__':
     acrcy_dict5 = {}
     acrcy_dict6 = {}
     acrcy_dict7 = {}
-
+    
     time_acrcy_dict = {}
     time_itr_dict = {}
     monitor_acry = False
     begin = time.time()
-    lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32)
+    debug = True
+    lsh = LSHCluster(all_reads=reads_err, q=6, k=3, m=50, L=32, debug=debug)
     C_til = lsh.run()
     print("time for base process: {}".format(time.time() - begin))
-
-    # info regarding the num of single sequences, in contrast to bigger clusters
-
+      
     if monitor_acry:
         keys = acrcy_dict1.keys()
         values1 = acrcy_dict1.values()
@@ -618,9 +640,9 @@ if __name__ == '__main__':
         values5 = acrcy_dict5.values()
         values6 = acrcy_dict6.values()
         values7 = acrcy_dict7.values()
-
+    
         df = pd.DataFrame()
-
+    
         df["keys"] = keys
         df["0.6"] = values1
         df["0.7"] = values2
@@ -629,13 +651,13 @@ if __name__ == '__main__':
         df["0.95"] = values5
         df["0.99"] = values6
         df["1.0"] = values7
-
+    
         fig = px.line(df, x=df["keys"], y=['0.6', '0.7', '0.8', '0.9', '0.95', '0.99', '1.0'])
         fig.show()
-
+    
         keys = time_itr_dict.keys()
         values = time_itr_dict.values()
-
+    
         px.line(x=keys, y=values)
     else:
         clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
