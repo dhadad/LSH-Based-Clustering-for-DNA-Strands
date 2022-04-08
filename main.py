@@ -16,19 +16,23 @@ except ImportError:
             if args not in d:
                 d[args] = func(*args)
             return d[args]
+
         return outer_func
 
 try:
-    from Levenshtein import distance as edit_dis
+    from Levenshtein import distance as edit_dis   # pip install python-Lavenshtein
 except ImportError:
 
     def symmetric(func):
         """
         The decorator is to be used when arguments' order doesn't have a significance.
         """
+
         def outer_func(s1, s2):
             return func(min(s1, s2), max(s1, s2))
+
         return outer_func
+
 
     @cache
     @symmetric
@@ -37,23 +41,18 @@ except ImportError:
         Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
         :param s1, s2: the two strings to get the distance between.
         """
-        try:
-            import Levenshtein      # pip install python-Lavenshtein
-            return Levenshtein.distance(s1, s2)
-        except ImportError:
-            if not s1 or not s2:
-                return float('inf')
-            tbl = {}
-            for i in range(len(s1) + 1):
-                tbl[i, 0] = i
-            for j in range(len(s2) + 1):
-                tbl[0, j] = j
-            for i in range(1, len(s1) + 1):
-                for j in range(1, len(s2) + 1):
-                    cost = 0 if s1[i - 1] == s2[j - 1] else 1
-                    tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
-            return tbl[i, j]
-
+        if not s1 or not s2:
+            return float('inf')
+        tbl = {}
+        for i in range(len(s1) + 1):
+            tbl[i, 0] = i
+        for j in range(len(s2) + 1):
+            tbl[0, j] = j
+        for i in range(1, len(s1) + 1):
+            for j in range(1, len(s2) + 1):
+                cost = 0 if s1[i - 1] == s2[j - 1] else 1
+                tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
+        return tbl[i, j]
 
 # **********************************
 #   Globals
@@ -91,7 +90,7 @@ class LSHCluster:
         print("number of cpus: {}".format(mp.cpu_count()))
         self.sc = LSHCluster.Score(len(all_reads))
         self.debug = debug
-        self.time = 0
+        self.duration = 0
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
@@ -111,6 +110,7 @@ class LSHCluster:
         score to a sequence that seem to be "more related" to to its cluster. That will be determined based on the
         number of sequences in the cluster we consider to be "close" to it (based on the condition used make pairs).
         """
+
         def __init__(self, n):
             if n <= 0:
                 raise ValueError("Invalid number of items")
@@ -234,7 +234,7 @@ class LSHCluster:
         res = {}
         for idx in range(len(self.all_reads)):
             res[idx] = self.seq_numset(idx)
-        self.time += time.time() - time_start
+        self.duration += time.time() - time_start
         print("time to create number set for each sequence: {}".format(time.time() - time_start))
         return res
 
@@ -251,7 +251,7 @@ class LSHCluster:
             perms.append(vals.copy())
         # LSH signature tuple (size m, instead of k, as the original paper suggests) for each sequence
         res = [LSHCluster.lsh_sig(self.numsets[idx], perms) for idx in range(len(self.numsets))]
-        self.time += time.time() - time_start
+        self.duration += time.time() - time_start
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
         return res
 
@@ -275,7 +275,8 @@ class LSHCluster:
                     print("wrong merge {} {}.\nseq1: {}\nseq2: {}\nreal_rep 1: {}\nreal_rep 2: {}\n"
                           "numset 1: {}\nnumset 2:{}\nfull sig 1:{}\nfull sig 2:{}\n************\n"
                           .format(min(elem_1, elem_2), max(elem_1, elem_2), self.all_reads[elem_1],
-                                  self.all_reads[elem_2], real_rep1, real_rep2, self.numsets[elem_1], self.numsets[elem_2],
+                                  self.all_reads[elem_2], real_rep1, real_rep2, self.numsets[elem_1],
+                                  self.numsets[elem_2],
                                   sorted(self.lsh_sigs[elem_1]), sorted(self.lsh_sigs[elem_2])))
             # update clusters:
             center, merged = min(p1, p2), max(p1, p2)
@@ -374,7 +375,7 @@ class LSHCluster:
                                   tuple(sorted([self.lsh_sigs[pair[1]][indexes[a]] for a in range(self.k)]))))
                 self.sc.update(pair[0], pair[1])
                 self._add_pair(pair[0], pair[1])
-            self.time += time.time() - time_start
+            self.duration += time.time() - time_start
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
         return self.C_til
@@ -393,17 +394,16 @@ class LSHCluster:
                     best = self.max_score[rep][r][0]
                     sd = LSHCluster.sorensen_dice(self.numsets[next_single], self.numsets[best])
                     if sd >= 0.27 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[next_single]),
-                                                                LSHCluster.index(self.all_reads[best])) <= 3):
+                                                              LSHCluster.index(self.all_reads[best])) <= 3):
                         # print("insert to queue: {} {}".format(next_single, rep))
                         tasks.task_done()
                         results.put((next_single, rep))
                         found = True
                         break
             if not found:
-                tasks.task_done()   # Nothing was chosen for this single
+                tasks.task_done()  # Nothing was chosen for this single
                 results.put((next_single, -1))
         return
-
 
     def relable(self, r=0, multi=False):
         """
@@ -423,13 +423,13 @@ class LSHCluster:
         results = mp.Queue()
         processes = []
         for _ in range(self.jobs):
-            processes.append(mp.Process(target=self.relable_given_singles, args=(tasks, results, r, )))
+            processes.append(mp.Process(target=self.relable_given_singles, args=(tasks, results, r,)))
         [p.start() for p in processes]
         for single in singles:
             tasks.put(single)
         for _ in range(self.jobs):
             tasks.put(None)
-        
+
         # inserting the pairs is done ins serial
         tasks.join()
         for _ in range(len(singles)):
@@ -437,7 +437,7 @@ class LSHCluster:
             if elem_2 == -1:
                 continue
             self._add_pair(elem_1, elem_2)
-        self.time += time.time() - time_start
+        self.duration += time.time() - time_start
         print("time for relabeling step: {}".format(time.time() - time_start))
         return self.C_til
 
@@ -479,7 +479,7 @@ class LSHCluster:
                     if sd >= 0.18:
                         self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0],
                                        update_maxscore=False)
-        self.time += time.time() - time_start
+        self.duration += time.time() - time_start
         print("Common sub-string step took: {}".format(time.time() - time_start))
         return self.C_til
 
@@ -497,7 +497,7 @@ class LSHCluster:
         print("Common sub-string step:")
         lsh.common_substr_step()
         print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        print("Total time (include init): {}".format(self.time))
+        print("Total time (include init): {}".format(self.duration))
 
 
 # **********************************
