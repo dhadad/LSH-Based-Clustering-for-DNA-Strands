@@ -56,7 +56,7 @@ except ImportError:
 
 
 # **********************************
-#   GLOBALS
+#   Globals
 # **********************************
 
 INDEX_LEN = 11
@@ -91,6 +91,7 @@ class LSHCluster:
         print("number of cpus: {}".format(mp.cpu_count()))
         self.sc = LSHCluster.Score(len(all_reads))
         self.debug = debug
+        self.time = 0
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
@@ -233,6 +234,7 @@ class LSHCluster:
         res = {}
         for idx in range(len(self.all_reads)):
             res[idx] = self.seq_numset(idx)
+        self.time += time.time() - time_start
         print("time to create number set for each sequence: {}".format(time.time() - time_start))
         return res
 
@@ -240,8 +242,6 @@ class LSHCluster:
         """
         Calculate the LSH signature of all the sequences in the input
         """
-        # calculate numsets, if not done before
-        numsets = self.numsets
         time_start = time.time()
         # generate m permutations
         perms = []
@@ -250,7 +250,8 @@ class LSHCluster:
             random.shuffle(vals)
             perms.append(vals.copy())
         # LSH signature tuple (size m, instead of k, as the original paper suggests) for each sequence
-        res = [LSHCluster.lsh_sig(numsets[idx], perms) for idx in range(len(numsets))]
+        res = [LSHCluster.lsh_sig(self.numsets[idx], perms) for idx in range(len(self.numsets))]
+        self.time += time.time() - time_start
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
         return res
 
@@ -373,6 +374,7 @@ class LSHCluster:
                                   tuple(sorted([self.lsh_sigs[pair[1]][indexes[a]] for a in range(self.k)]))))
                 self.sc.update(pair[0], pair[1])
                 self._add_pair(pair[0], pair[1])
+            self.time += time.time() - time_start
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
         return self.C_til
@@ -405,7 +407,7 @@ class LSHCluster:
 
     def relable(self, r=0, multi=False):
         """
-        Used AFTER we executed 'run'. The purpose is to handle single sequences (meaning, clusters of size 1).
+        Used AFTER we executed 'lsh_clustering'. The purpose is to handle single sequences (meaning, clusters of size 1).
         We'll iterate over those sequences, and look for the cluster whose most highly ranked sequence is similar to
         that single sequence.
         :param r: 0 for the using the sequence with the highest score to represent a cluster. 1 for the second highest,
@@ -433,9 +435,9 @@ class LSHCluster:
         for _ in range(len(singles)):
             elem_1, elem_2 = results.get()
             if elem_2 == -1:
-                continue;
+                continue
             self._add_pair(elem_1, elem_2)
-
+        self.time += time.time() - time_start
         print("time for relabeling step: {}".format(time.time() - time_start))
         return self.C_til
 
@@ -477,23 +479,25 @@ class LSHCluster:
                     if sd >= 0.18:
                         self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0],
                                        update_maxscore=False)
+        self.time += time.time() - time_start
         print("Common sub-string step took: {}".format(time.time() - time_start))
         return self.C_til
 
     def run(self):
-        begin = time.time()
+        lsh_begin = time.time()
         self.lsh_clustering()
-        print_accrcy(self.C_til, C_dict, C_reps, reads_err, size)
+        print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
+        print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        relable_begin = time.time()
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
             lsh.relable(r=r)
-            print_accrcy(self.C_til, C_dict, C_reps, reads_err, size)
-        print("Onecore clusters:")
-        print_accrcy(self.C_til, C_dict, C_reps, reads_err, size)
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        print("Time for all the relabeling step: {}".format(time.time() - relable_begin))
         print("Common sub-string step:")
-        lsh.lsh_clustering(iters=5)
-        print_accrcy(self.C_til, C_dict, C_reps, reads_err, size)
-        print("Total time: {}".format(time.time() - begin))
+        lsh.common_substr_step()
+        print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        print("Total time (include init): {}".format(self.time))
 
 
 # **********************************
@@ -563,9 +567,10 @@ def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
     return acrcy
 
 
-def print_accrcy(C_til, C_dict, C_reps, reads_err, size):
+def print_accrcy(C_til, C_dict, C_reps, reads_err):
     clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
     singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
+    size = len(clstrs) + len(singles)
     print("Clusters > 1: {}, Singles: {}".format(len(clstrs), len(singles)))
     print("Accuracy:")
     accrcy = {gamma: calc_acrcy(C_til, C_dict, C_reps, gamma, reads_err) / size
@@ -580,7 +585,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err, size):
 
 if __name__ == '__main__':
     reads_cl = []  # the whole input
-    dataset = r"./evyat500.txt"
+    dataset = r"./evyat5000csafe.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
