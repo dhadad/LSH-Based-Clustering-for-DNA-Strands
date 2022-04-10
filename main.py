@@ -381,6 +381,13 @@ class LSHCluster:
         return self.C_til
 
     def relable_given_singles(self, tasks, results, r=0):
+        """
+        Preforms the relabling process, by one of the worker threads.
+        :param tasks: queue with the singles left for scanning a cluster to match them to.
+        :param results: queue for storing the results (the pairs of a single and a cluster's representative)
+        :param r: we store the the sequences with the best score in a cluster in order, so r=0 represents the
+            best one, r=1 the one after it, and so on.
+        """
         clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
         while True:
             next_single = tasks.get()
@@ -428,7 +435,7 @@ class LSHCluster:
         for single in singles:
             tasks.put(single)
         for _ in range(self.jobs):
-            tasks.put(None)
+            tasks.put(None)     # poison pill
 
         # inserting the pairs is done ins serial
         tasks.join()
@@ -483,20 +490,27 @@ class LSHCluster:
         print("Common sub-string step took: {}".format(time.time() - time_start))
         return self.C_til
 
-    def run(self):
+    def run(self, accrcy=True):
+        """
+        To be used in order to preform the whole algorithm flow.
+        :param accrcy: True for printing accuracy results. False otherwise.
+        """
         lsh_begin = time.time()
         self.lsh_clustering()
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
-        print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        if accrcy:
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         relable_begin = time.time()
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
             lsh.relable(r=r)
-            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+            if accrcy:
+                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Time for all the relabeling step: {}".format(time.time() - relable_begin))
         print("Common sub-string step:")
         lsh.common_substr_step()
-        print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        if accrcy:
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Total time (include init): {}".format(self.duration))
 
 
