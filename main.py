@@ -1,41 +1,21 @@
 # **********************************
 #   Imports & Auxiliary functions
 # **********************************
-
 import time
 import random
 import multiprocessing as mp
+from functools import lru_cache
+import numpy as np
 
 try:
-    from functools import cache
+    from Levenshtein import distance
+    print("INFO: using external library edit distance")
+    @lru_cache
+    def edit_dis(s1, s2):
+        return distance(s1, s2)
 except ImportError:
-    def cache(func):
-        d = dict()
-
-        def outer_func(*args):
-            if args not in d:
-                d[args] = func(*args)
-            return d[args]
-
-        return outer_func
-
-try:
-    from Levenshtein import distance as edit_dis   # pip install python-Lavenshtein
-except ImportError:
-
-    def symmetric(func):
-        """
-        The decorator is to be used when arguments' order doesn't have a significance.
-        """
-
-        def outer_func(s1, s2):
-            return func(min(s1, s2), max(s1, s2))
-
-        return outer_func
-
-
-    @cache
-    @symmetric
+    print("INFO: using house maid implementation of edit distance")
+    @lru_cache
     def edit_dis(s1, s2):
         """
         Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
@@ -54,15 +34,17 @@ except ImportError:
                 tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
         return tbl[i, j]
 
+
 # **********************************
 #   Globals
 # **********************************
-
-INDEX_LEN = 11
-BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
+INDEX_LEN = 15
 NUM_HEIGHEST = 4
 ADJ_DIFF_FACTOR = 10
-
+STOP_RELABLE = 0.01     # 1 precent
+PRIORITZED = 0
+NOT_PRIORITZED = 1
+REF_PNTS = 12
 
 # **********************************
 #   Main class
@@ -87,8 +69,7 @@ class LSHCluster:
         self.L = L
         self.top = 4 ** q
         self.jobs = mp.cpu_count() - 1
-        print("number of cpus: {}".format(mp.cpu_count()))
-        self.sc = LSHCluster.Score(len(all_reads))
+        print("# CPU's to be used: {}".format(self.jobs))
         self.debug = debug
         self.duration = 0
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
@@ -97,38 +78,18 @@ class LSHCluster:
         # array for tracking the sequences with the highest score in the cluster
         self.max_score = [[(idx, 0)] for idx in range(len(all_reads))]
 
+        # array for tracking the scores
+        self.score = np.array([0 for _ in range(len(all_reads))])
+
         # mapping between a sequence's index to it's parent's index
-        self.parent = [idx for idx in range(len(all_reads))]
+        self.parent = np.array([idx for idx in range(len(all_reads))])
 
         # calculate singatures upon initializing the object
-        self.numsets = self._numsets()
-        self.lsh_sigs = self._lsh_sigs()
-
-    class Score:
-        """
-        The Score class is to be used to keep track of the score given to the sequences. The idea is to give a higher
-        score to a sequence that seem to be "more related" to to its cluster. That will be determined based on the
-        number of sequences in the cluster we consider to be "close" to it (based on the condition used make pairs).
-        """
-
-        def __init__(self, n):
-            if n <= 0:
-                raise ValueError("Invalid number of items")
-            self.seen = dict()
-            self.values = [0 for _ in range(n)]
-
-        def update(self, elem_1, elem_2):
-            """
-            Update the score of the elements we are about to assign to the same cluster.
-            :param elem_1, elem_2: the indices of two sequences in all_reads.
-            :param scores: array of positive integers, with the grade we give to each sequence. higher it is,
-                higher the chance we'll choose it to represent the cluster.
-            """
-            if (elem_1, elem_2) in self.seen or (elem_2, elem_1) in self.seen:
-                return
-            self.values[elem_1] += 1
-            self.values[elem_2] += 1
-            self.seen[(elem_1, elem_2)] = True
+        self.perms = list()
+        self.numsets = dict()
+        self._numsets()
+        self.lsh_sigs = dict()
+        self._lsh_sigs()
 
     @staticmethod
     def index(seq):
@@ -160,31 +121,6 @@ class LSHCluster:
         return temp
 
     @staticmethod
-    def qgram(sub_seq):
-        """
-        Calculate the value of a Q-gram
-        :param sub_seq: sub string of the original sequence, of length q
-        :return: integer, representing the value of the Q-gram
-        """
-        tot = 0
-        for pos in range(len(sub_seq)):
-            tot += (4 ** pos) * BASE_VALS[sub_seq[pos]]
-        return tot
-
-    @staticmethod
-    def jaccard_similarity(numset_1, numset_2):
-        """
-        Approximate the edit distance of two sequences using Jaccard simillarity.
-        :param numset_1, numset_2: two arrays of integers. each one represents one of the sequences we
-            we wish to estimate the distance for. The numbers are the value of the Q-grams which the
-            sequence consists of. They are obtained using '_numsets' function.
-        :return: float, from 0 to 1.
-        """
-        intersection = len(list(set(numset_1).intersection(numset_2)))
-        union = (len(numset_1) + len(numset_2)) - intersection
-        return float(intersection) / union
-
-    @staticmethod
     def sorensen_dice(numset_1, numset_2):
         """
         Approximate the edit distance of two sequences using Sorensen-Dice.
@@ -196,64 +132,114 @@ class LSHCluster:
         set_1, set_2 = set(numset_1), set(numset_2)
         intersection = len(set_1.intersection(set_2))
         return 2 * float(intersection) / (len(set_1) + len(set_2))
-
-    def seq_numset(self, idx):
+    
+    def _create_numset(self, tasks, results):
         """
-        Convert a sequence into a set of numbers
-        :param idx: index of the sequence within the 'all_reads' array
-        :return: array of integers, each one is the value of a Q-gram
+        A single number set generation.
+        :param tasks: queue with the indices of the sequences (as part of 'all_reads') we want to calculate a number set for.
+        :param results: queue for storing the results (the pairs of an index and a number set (represented as a list))
+        :return: a string
         """
-        arr = []
-        seq = self.all_reads[idx]
-        for idx in range(len(seq) - self.q + 1):
-            arr.append(LSHCluster.qgram(seq[idx:idx + self.q]))
-        return arr
-
-    @staticmethod
-    def lsh_sig(numset, perms):
-        """
-        Obtain a LSH signature for a sequence, converted to its representation as a set of numbers
-        :param numset: array of integers, each one is a Q-gram value (so its length is the
-            original sequence's length minus q)
-        :param perms: array of arrays, each: permutation of {0,..., 4**q}
-        :return: an array of length equal to the nubmer of permutations given. each element is the
-            MH signature of the sequence calculated with the permutation with the suitable index.
-        """
-        lsh = []
-        for perm in perms:
-            lsh.append(min([perm[num] for num in numset]))  # append a MH signature
-        return lsh
+        def _single_numset(seq, q):
+            numset = []
+            for idx in range(len(seq) - q + 1):
+                sub = seq[idx:idx + q]
+                tot = 0
+                for pos in range(len(sub)):
+                    if sub[pos] == 'C':
+                        tot += 4 ** pos
+                    elif sub[pos] == 'G':
+                        tot += (4 ** pos) * 2
+                    elif sub[pos] == 'T':
+                        tot += (4 ** pos) * 3
+                numset.append(tot)
+            return numset
+        
+        while True:
+            seq_idx = tasks.get()
+            if seq_idx is None:
+                tasks.task_done()
+                break
+            res = _single_numset(self.all_reads[seq_idx], self.q)
+            tasks.task_done()
+            results.put((seq_idx, res))
+        return
 
     def _numsets(self):
         """
-        Generate the numbers sets for all the sequences
-        :return: a dictionary, mapping a number set for each sequence in the input,
-            while the key is the index of the sequence in all_reads
+        Generate the numbers sets for all the sequences. Creates a dictionary, mapping a number set for
+        each sequence in the input, while the key is the index of the sequence in all_reads
         """
         time_start = time.time()
-        res = {}
+        tasks = mp.JoinableQueue()
+        results = mp.Queue()
+        processes = []
+        for _ in range(self.jobs):
+            processes.append(mp.Process(target=self._create_numset, args=(tasks, results,)))
+        [p.start() for p in processes]
         for idx in range(len(self.all_reads)):
-            res[idx] = self.seq_numset(idx)
+            tasks.put(idx)
+        for _ in range(self.jobs):
+            tasks.put(None)     # poison pill
+
+        tasks.join()
+        for _ in range(len(self.all_reads)):
+            idx, numset = results.get()
+            self.numsets[idx] = numset
         self.duration += time.time() - time_start
         print("time to create number set for each sequence: {}".format(time.time() - time_start))
-        return res
+
+    def _create_lsh_sig(self, tasks, results):
+        """
+        Obtain a LSH signature for a sequence, converted to its representation as a set of numbers
+        make use of 'numsets': an array of integers, each one is a Q-gram value (so its length is the
+        original sequence's length minus q). make use of self.perms: array of arrays, each: permutation 
+        of {0,..., 4**q}. 
+        The result is an array of length equal to the nubmer of permutations given. each element is the
+        MH signature of the sequence calculated with the permutation with the suitable index. It is inserted
+        to the results queue.
+        :param tasks: queue with the indices of the sequences (as part of 'all_reads') we want to calculate a signature for.
+        :param results: queue for storing the results (the pairs of an index and a LSH signature (represented as a list))
+        """
+        while True:
+            next_idx = tasks.get()
+            if next_idx is None:
+                tasks.task_done()
+                break
+            res = []
+            for perm in self.perms:
+                res.append(min([perm[num] for num in self.numsets[next_idx]]))  # append a MH signature
+            tasks.task_done()
+            results.put((next_idx, res))
+        return
 
     def _lsh_sigs(self):
         """
         Calculate the LSH signature of all the sequences in the input
         """
         time_start = time.time()
-        # generate m permutations
-        perms = []
+        # generate m permutations.
         vals = [num for num in range(self.top)]
         for _ in range(self.m):
             random.shuffle(vals)
-            perms.append(vals.copy())
+            self.perms.append(vals.copy())
         # LSH signature tuple (size m, instead of k, as the original paper suggests) for each sequence
-        res = [LSHCluster.lsh_sig(self.numsets[idx], perms) for idx in range(len(self.numsets))]
+        tasks, results, processes = mp.JoinableQueue(), mp.Queue(), list()
+        for _ in range(self.jobs):
+            processes.append(mp.Process(target=self._create_lsh_sig, args=(tasks, results,)))
+        [p.start() for p in processes]
+        for idx in range(len(self.all_reads)):
+            tasks.put(idx)
+        for _ in range(self.jobs):
+            tasks.put(None)     # poison pill
+
+        tasks.join()
+        del self.perms      # no need to keep it
+        for _ in range(len(self.all_reads)):
+            idx, sig = results.get()
+            self.lsh_sigs[idx] = sig
         self.duration += time.time() - time_start
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
-        return res
 
     def _add_pair(self, elem_1, elem_2, update_maxscore=True):
         """
@@ -293,15 +279,15 @@ class LSHCluster:
             found_1, found_2 = False, False
             for j in range(len(both_max_score)):
                 if both_max_score[j][0] == elem_1:
-                    both_max_score[j] = (elem_1, self.sc.values[elem_1])
+                    both_max_score[j] = (elem_1, self.score[elem_1])
                     found_1 = True
                 elif both_max_score[j][0] == elem_2:
-                    both_max_score[j] = (elem_2, self.sc.values[elem_2])
+                    both_max_score[j] = (elem_2, self.score[elem_2])
                     found_2 = True
             if not found_1:
-                both_max_score.append((elem_1, self.sc.values[elem_1]))
+                both_max_score.append((elem_1, self.score[elem_1]))
             if not found_2:
-                both_max_score.append((elem_2, self.sc.values[elem_2]))
+                both_max_score.append((elem_2, self.score[elem_2]))
 
             both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:NUM_HEIGHEST]
             self.max_score[merged] = [tuple()]
@@ -312,20 +298,28 @@ class LSHCluster:
         Re-calculate the 'max_score' value for a single given cluster.
         :param rep: the cluster's representative's index.
         """
-        clstr_sc = [(seq_ind, self.sc.values[seq_ind]) for seq_ind in self.C_til[rep]]
+        clstr_sc = [(seq_ind, self.score[seq_ind]) for seq_ind in self.C_til[rep]]
         self.max_score[rep] = sorted(clstr_sc, reverse=True, key=lambda x: x[1])[:NUM_HEIGHEST]
 
-    def handle_some_buckets(self, buckets):
-        pairs = set()
-        for elems in buckets.values():
-            if len(elems) <= 1:
-                continue
-            for elem in elems[1:]:
-                sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
-                if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[elem]),
-                                                         LSHCluster.index(self.all_reads[elems[0]])) <= 3):
-                    pairs.add((elems[0], elem))
-        return pairs
+    def _handle_bucket(self, tasks, results):
+        while True:
+            sig = tasks.get()
+            if sig is None:
+                tasks.task_done()
+                break
+            res = set()
+            if len(self.buckets[sig]) > 1:
+                bucket_ref_points = random.choices(self.buckets[sig], k=REF_PNTS)
+                for ref in bucket_ref_points:
+                    for elem in self.buckets[sig]:
+                        if elem == ref:
+                            continue
+                        sd = LSHCluster.sorensen_dice(self.numsets[ref], self.numsets[elem])
+                        if sd >= 0.38:
+                            res.add((ref, elem))
+            tasks.task_done()
+            results.put(res)
+        return        
 
     def lsh_clustering(self, iters=0, k=0):
         """
@@ -335,14 +329,13 @@ class LSHCluster:
         :return: the updated C_til
         """
         iters = self.L if iters == 0 else iters
+        k = self.k if k == 0 else k
         for itr in range(iters):
             time_start = time.time()
-            pairs = set()
             sigs = []
-            buckets = {}
-
+            self.buckets = {}
+            pairs = set()
             # choose random k elements of the LSH signature
-            k = self.k if k == 0 else k
             indexes = random.sample(range(self.m), k)
             for idx in range(len(self.all_reads)):
                 # represent the sig as a single integer
@@ -352,43 +345,44 @@ class LSHCluster:
 
             # buckets[sig] = [indexes (from all_reads) of (hopefully) similar sequences]
             for i in range(len(self.all_reads)):
-                if sigs[i] in buckets:
-                    buckets[sigs[i]].append(i)
+                if sigs[i] in self.buckets:
+                    self.buckets[sigs[i]].append(i)
                 else:
-                    buckets[sigs[i]] = [i]
+                    self.buckets[sigs[i]] = [i]
 
-            # from each bucket we'll keep pairs. the first element will be announced as center
-            for elems in buckets.values():
-                if len(elems) <= 1:
-                    continue
-                for elem in elems[1:]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
-                    if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[elem]),
-                                                             LSHCluster.index(self.all_reads[elems[0]])) <= 3):
-                        pairs.add((elems[0], elem))
+            tasks, results, processes = mp.JoinableQueue(), mp.Queue(), list()
+            for _ in range(self.jobs):
+                processes.append(mp.Process(target=self._handle_bucket, args=(tasks, results,)))
+            [p.start() for p in processes]
+            cnt = 0
+            for sig in self.buckets.keys():
+                if len(self.buckets[sig]) > 1:
+                    cnt += 1
+                    tasks.put(sig)
+            for _ in range(self.jobs):
+                tasks.put(None)     # poison pill
 
-            for pair in pairs:
-                if self.debug:
-                    print("tried merge {} {}. sigs: {} {}"
-                          .format(min(pair[0], pair[1]), max(pair[0], pair[1]),
-                                  tuple(sorted([self.lsh_sigs[pair[0]][indexes[a]] for a in range(self.k)])),
-                                  tuple(sorted([self.lsh_sigs[pair[1]][indexes[a]] for a in range(self.k)]))))
-                self.sc.update(pair[0], pair[1])
-                self._add_pair(pair[0], pair[1])
+            tasks.join()
+            for _ in range(cnt):
+                pairs = results.get()
+                for pair in pairs:
+                    self.score[pair[1]] += 1
+                    self.score[pair[0]] += 1
+                    self._add_pair(pair[0], pair[1])    
             self.duration += time.time() - time_start
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
         return self.C_til
 
-    def relable_given_singles(self, tasks, results, r=0):
+    def _relable_given_singles(self, tasks, results, r=0):
         """
-        Preforms the relabling process, by one of the worker threads.
+        Preforms the relabeling process, by one of the worker threads.
         :param tasks: queue with the singles left for scanning a cluster to match them to.
         :param results: queue for storing the results (the pairs of a single and a cluster's representative)
         :param r: we store the the sequences with the best score in a cluster in order, so r=0 represents the
             best one, r=1 the one after it, and so on.
         """
-        clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
+        clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) > 1]
         while True:
             next_single = tasks.get()
             if next_single is None:
@@ -412,25 +406,27 @@ class LSHCluster:
                 results.put((next_single, -1))
         return
 
-    def relable(self, r=0, multi=False):
+    def relable(self, r=0):
         """
         Used AFTER we executed 'lsh_clustering'. The purpose is to handle single sequences (meaning, clusters of size 1).
         We'll iterate over those sequences, and look for the cluster whose most highly ranked sequence is similar to
         that single sequence.
         :param r: 0 for the using the sequence with the highest score to represent a cluster. 1 for the second highest,
             and so on. if the cluster is smaller than 'r', we won't use it.
-        :param multi: determine whether to use multiprocessing.
-        :return: the updated C_til
+        :return: the precent of relabled singles out of the total number of singles we began with.
         """
         time_start = time.time()
-        singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+        singles = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) == 1]
+        initial_singles = len(singles)
+        if initial_singles == 0:
+            return 0
 
         # scanning for pairs will be excuted in paralel
         tasks = mp.JoinableQueue()
         results = mp.Queue()
         processes = []
         for _ in range(self.jobs):
-            processes.append(mp.Process(target=self.relable_given_singles, args=(tasks, results, r,)))
+            processes.append(mp.Process(target=self._relable_given_singles, args=(tasks, results, r,)))
         [p.start() for p in processes]
         for single in singles:
             tasks.put(single)
@@ -439,14 +435,18 @@ class LSHCluster:
 
         # inserting the pairs is done ins serial
         tasks.join()
-        for _ in range(len(singles)):
+        for _ in range(initial_singles):
             elem_1, elem_2 = results.get()
             if elem_2 == -1:
                 continue
             self._add_pair(elem_1, elem_2)
+        
+        # information for deciding whether to continue to additional iterations
+        final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
+        success_rate = float(initial_singles - final_singles) / initial_singles
         self.duration += time.time() - time_start
-        print("time for relabeling step: {}".format(time.time() - time_start))
-        return self.C_til
+        print("Time for relabeling step {}: {}. Success rate: {}".format(r, time.time() - time_start, success_rate))
+        return success_rate
 
     def common_substr_step(self, w=3, t=4, repeats=220):
         """
@@ -469,7 +469,6 @@ class LSHCluster:
         relevant_centers = [center for center, clstr in self.C_til.items() if 1 <= len(clstr) <= 13]
         if len(relevant_centers) == 0: return self.C_til
         for itr in range(repeats):
-            print("itr: %s" % itr)
             a = ''.join(random.choice('ACGT') for _ in range(w))
             singles = [random.choice(self.C_til[center]) for center in relevant_centers if len(self.C_til[center]) >= 1]
             common_substr_hash = []
@@ -485,7 +484,7 @@ class LSHCluster:
                                                   self.numsets[common_substr_hash[idx + 1][0]])
                     if sd >= 0.18:
                         self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0],
-                                       update_maxscore=False)
+                                       update_maxscore=True)
         self.duration += time.time() - time_start
         print("Common sub-string step took: {}".format(time.time() - time_start))
         return self.C_til
@@ -500,14 +499,22 @@ class LSHCluster:
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        '''
+        print("First common sub-string step:")
+        lsh.common_substr_step()
+        if accrcy:
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        '''
         relable_begin = time.time()
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
-            lsh.relable(r=r)
+            success = lsh.relable(r=r)
             if accrcy:
                 print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+            if success < STOP_RELABLE:
+                break
         print("Time for all the relabeling step: {}".format(time.time() - relable_begin))
-        print("Common sub-string step:")
+        print("Second common sub-string step:")
         lsh.common_substr_step()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
@@ -598,14 +605,14 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 # **********************************
 
 if __name__ == '__main__':
-    reads_cl = []  # the whole input
-    dataset = r"./evyat5000csafe.txt"
+    reads_cl = []
+    dataset = r"./datasets/evyat100000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
             reads_cl.append(line.strip())
     cnt = 0
-    reads = []  # representatives
+    reads = []
     for i in range(0, len(reads_cl)):
         if reads_cl[i] != "":
             if reads_cl[i][0] == "*":
