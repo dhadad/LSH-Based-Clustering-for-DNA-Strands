@@ -38,6 +38,7 @@ except ImportError:
 # **********************************
 #   Globals
 # **********************************
+BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
 NUM_HEIGHEST = 4
 ADJ_DIFF_FACTOR = 10
@@ -133,34 +134,30 @@ class LSHCluster:
         intersection = len(set_1.intersection(set_2))
         return 2 * float(intersection) / (len(set_1) + len(set_2))
     
+    @staticmethod
+    def _single_numset(seq, q):
+        numset = []
+        for idx in range(len(seq) - q + 1):
+            sub = seq[idx:idx + q]
+            tot = 0
+            for pos in range(len(sub)):
+                tot += (4 ** pos) * BASE_VALS[sub[pos]]
+            numset.append(tot)
+        return numset
+
     def _create_numset(self, tasks, results):
         """
         A single number set generation.
         :param tasks: queue with the indices of the sequences (as part of 'all_reads') we want to calculate a number set for.
         :param results: queue for storing the results (the pairs of an index and a number set (represented as a list))
         :return: a string
-        """
-        def _single_numset(seq, q):
-            numset = []
-            for idx in range(len(seq) - q + 1):
-                sub = seq[idx:idx + q]
-                tot = 0
-                for pos in range(len(sub)):
-                    if sub[pos] == 'C':
-                        tot += 4 ** pos
-                    elif sub[pos] == 'G':
-                        tot += (4 ** pos) * 2
-                    elif sub[pos] == 'T':
-                        tot += (4 ** pos) * 3
-                numset.append(tot)
-            return numset
-        
+        """      
         while True:
             seq_idx = tasks.get()
             if seq_idx is None:
                 tasks.task_done()
                 break
-            res = _single_numset(self.all_reads[seq_idx], self.q)
+            res = LSHCluster._single_numset(self.all_reads[seq_idx], self.q)
             tasks.task_done()
             results.put((seq_idx, res))
         return
