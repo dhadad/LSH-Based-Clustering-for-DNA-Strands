@@ -41,11 +41,12 @@ except ImportError:
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
 NUM_HEIGHEST = 4
-ADJ_DIFF_FACTOR = 10
+ADJ_DIFF_FACTOR = 8
 STOP_RELABLE = 0.01     # 1 precent
 PRIORITZED = 0
 NOT_PRIORITZED = 1
 REF_PNTS = 12
+SPLIT_THRESHOLD = 9
 
 # **********************************
 #   Main class
@@ -134,11 +135,10 @@ class LSHCluster:
         intersection = len(set_1.intersection(set_2))
         return 2 * float(intersection) / (len(set_1) + len(set_2))
     
-    @staticmethod
-    def _single_numset(seq, q):
+    def _single_numset(self, seq, q):
         numset = []
-        for idx in range(len(seq) - q + 1):
-            sub = seq[idx:idx + q]
+        for idx in range(len(self.all_reads[seq]) - q + 1):
+            sub = self.all_reads[seq][idx:idx + q]
             tot = 0
             for pos in range(len(sub)):
                 tot += (4 ** pos) * BASE_VALS[sub[pos]]
@@ -157,7 +157,7 @@ class LSHCluster:
             if seq_idx is None:
                 tasks.task_done()
                 break
-            res = LSHCluster._single_numset(self.all_reads[seq_idx], self.q)
+            res = self._single_numset(seq_idx, self.q)
             tasks.task_done()
             results.put((seq_idx, res))
         return
@@ -249,18 +249,6 @@ class LSHCluster:
         p1 = self.rep_find(elem_1)
         p2 = self.rep_find(elem_2)
         if p1 != p2:
-            if self.debug:
-                real_rep1 = rep_in_C(reads_err[elem_1], C_reps)
-                real_rep2 = rep_in_C(reads_err[elem_2], C_reps)
-                org_clstr_1 = C_dict[real_rep1]
-                org_clstr_2 = C_dict[real_rep2]
-                if reads_err[elem_2] not in org_clstr_1 or reads_err[elem_1] not in org_clstr_2:
-                    print("wrong merge {} {}.\nseq1: {}\nseq2: {}\nreal_rep 1: {}\nreal_rep 2: {}\n"
-                          "numset 1: {}\nnumset 2:{}\nfull sig 1:{}\nfull sig 2:{}\n************\n"
-                          .format(min(elem_1, elem_2), max(elem_1, elem_2), self.all_reads[elem_1],
-                                  self.all_reads[elem_2], real_rep1, real_rep2, self.numsets[elem_1],
-                                  self.numsets[elem_2],
-                                  sorted(self.lsh_sigs[elem_1]), sorted(self.lsh_sigs[elem_2])))
             # update clusters:
             center, merged = min(p1, p2), max(p1, p2)
             self.C_til[center].extend(self.C_til[merged])
@@ -486,6 +474,77 @@ class LSHCluster:
         print("Common sub-string step took: {}".format(time.time() - time_start))
         return self.C_til
 
+    def avg_index(self, clstr):
+        """
+        Approximate a index (prefix of size INDEX_LEN) for a given cluster. Uses majority voting.
+        :param clstr: list of integers, each one is refers to a sequence in self.all_reads.
+        :returns: a string of size INDEX_LEN, which should represent the average index of the given cluster
+        """
+        prefix = ['A'] * INDEX_LEN
+        for i in range(len(prefix)):
+            hist = {'A': 0, 'C': 0, 'T': 0, 'G': 0}
+            for elem in clstr:
+                hist[self.all_reads[elem][i]] += 1
+            prefix[i] = max(hist, key=hist.get)
+        return ''.join(prefix)
+
+    def splitter(self, split_singles=False, update_maxscore=True):
+        """
+        The method's aim is to go through all the clusters and to split clusters where it is highly likely we
+        merged two true clusters into one.
+        To be used only after self.run() finished executing.
+        :param update_maxscore: boolean, determine whether to update the self.max_score structure. There's no point
+            suffering from the overhead if the splitter will be used a last step in the algorithm. Otherwise, you'd
+            probably want the self.max_score to store the real values, for having self._add_pair() working properly.
+        :return: the updated C_til
+        """
+        tot = time.time()
+        cnt = 0
+        for rep in self.C_til.keys():
+            if len(self.C_til[rep]) < 3:
+                continue
+            # arrange the sequences according to their score, sorted
+            best = self.max_score[rep][0][0]
+            axis = [(seq_ind, self.sorensen_dice(self.numsets[best], self.numsets[seq_ind]))
+                    for seq_ind in self.C_til[rep] if seq_ind != best]
+            axis.sort(key=lambda x: x[1])
+
+            # detect if the axis consist of two separate groups
+            avg_diff = float(0)
+            for ind in range(len(axis) - 1):
+                avg_diff += axis[ind + 1][1] - axis[ind][1]
+            avg_diff /= (len(axis) - 1)
+            max_diff, ind_max_diff = 0, -1
+            for ind in range(len(axis) - 1):
+                cur_diff = axis[ind + 1][1] - axis[ind][1]
+                if cur_diff > max_diff:
+                    max_diff = cur_diff
+                    ind_max_diff = ind
+            if ind_max_diff == -1 or (not split_singles and (ind_max_diff == 0 or ind_max_diff == len(axis) - 2)):
+                continue
+
+            # splitting
+            if max_diff >= ADJ_DIFF_FACTOR * avg_diff:
+                clstr_1 = [axis[ind][0] for ind in range(ind_max_diff + 1)]
+                clstr_2 = [axis[ind][0] for ind in range(ind_max_diff + 1, len(axis))]
+                diff_clstrs = edit_dis(self.avg_index(clstr_1), self.avg_index(clstr_2))
+                if diff_clstrs >= SPLIT_THRESHOLD:
+                    cnt += 1
+                    if rep in clstr_1:
+                        self.C_til[rep] = clstr_1
+                        self.C_til[clstr_2[0]] = clstr_2
+                        other_rep = clstr_2[0]
+                    else:
+                        self.C_til[rep] = clstr_2
+                        self.C_til[clstr_1[0]] = clstr_1
+                        other_rep = clstr_1[0]
+                    if update_maxscore:
+                        self.update_maxscore(rep)
+                        self.update_maxscore(other_rep)
+
+        print("Total time for splitting {} clusters: {}".format(cnt, time.time() - tot))
+        return self.C_til
+
     def run(self, accrcy=True):
         """
         To be used in order to preform the whole algorithm flow.
@@ -496,12 +555,6 @@ class LSHCluster:
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        '''
-        print("First common sub-string step:")
-        lsh.common_substr_step()
-        if accrcy:
-            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        '''
         relable_begin = time.time()
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
@@ -513,6 +566,10 @@ class LSHCluster:
         print("Time for all the relabeling step: {}".format(time.time() - relable_begin))
         print("Second common sub-string step:")
         lsh.common_substr_step()
+        if accrcy:
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        print("Splitting stage:")
+        lsh.splitter()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Total time (include init): {}".format(self.duration))
@@ -603,7 +660,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat100000.txt"
+    dataset = r"./datasets/evyat50000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
