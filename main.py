@@ -306,27 +306,24 @@ class LSHCluster:
             results.put(res)
         return        
 
-    def lsh_clustering(self, iters=0, k=0):
+    def lsh_clustering(self):
         """
         Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
         signature for each, and finally iterate L times looking for matching pairs, to be inserted to the
         same cluster.
         :return: the updated C_til
         """
-        iters = self.L if iters == 0 else iters
-        k = self.k if k == 0 else k
-        for itr in range(iters):
+        for itr in range(self.L):
             time_start = time.time()
             sigs = []
             self.buckets = {}
             pairs = set()
             # choose random k elements of the LSH signature
-            indexes = random.sample(range(self.m), k)
+            indexes = random.sample(range(self.m), self.k)
             for idx in range(len(self.all_reads)):
                 # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(k))
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
                 sigs.append(sig)
-            print("{} LSH signatures calculated.".format(time.time() - time_start))
 
             # buckets[sig] = [indexes (from all_reads) of (hopefully) similar sequences]
             for i in range(len(self.all_reads)):
@@ -356,8 +353,67 @@ class LSHCluster:
                     self._add_pair(pair[0], pair[1])    
             self.duration += time.time() - time_start
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
-
         return self.C_til
+
+    def relable_lin(self):
+        tot = time.time()
+        k = self.k
+        focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+        initial_singles = len(focus)
+        clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) > 1]
+        for rep in clstr_reps:
+            for r in range(2):
+                if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
+                    best = self.max_score[rep][r][0]
+                    focus.append(best)
+
+        # order?
+        random.shuffle(focus)
+
+        for itr in range(30):
+            time_start = time.time()
+            sigs = {}
+            self.buckets = {}
+            pairs = set()
+            # choose random k elements of the LSH signature
+            indexes = random.sample(range(self.m), k)
+            for idx in focus:
+                # represent the sig as a single integer
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(k))
+                sigs[idx] = sig
+
+            for idx, sig in sigs.items():
+                if sig in self.buckets:
+                    self.buckets[sig].append(idx)
+                else:
+                    self.buckets[sig] = [idx]
+
+            tasks, results, processes = mp.JoinableQueue(), mp.Queue(), list()
+            for _ in range(self.jobs):
+                processes.append(mp.Process(target=self._handle_bucket, args=(tasks, results,)))
+            [p.start() for p in processes]
+            cnt = 0
+            for sig in self.buckets.keys():
+                if len(self.buckets[sig]) > 1:
+                    cnt += 1
+                    tasks.put(sig)
+            for _ in range(self.jobs):
+                tasks.put(None)     # poison pill
+
+            tasks.join()
+            for _ in range(cnt):
+                pairs = results.get()
+                for pair in pairs:
+                    self.score[pair[1]] += 1
+                    self.score[pair[0]] += 1
+                    self._add_pair(pair[0], pair[1])    
+            print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
+
+        final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
+        success_rate = float(initial_singles - final_singles) / initial_singles
+        self.duration += time.time() - time_start
+        print("time for a 'relabel linear' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
+        return success_rate
 
     def _relable_given_singles(self, tasks, results, r=0):
         """
@@ -368,13 +424,18 @@ class LSHCluster:
             best one, r=1 the one after it, and so on.
         """
         clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) > 1]
+        sum_amtps = 0
+        itrs = 0
         while True:
             next_single = tasks.get()
             if next_single is None:
                 tasks.task_done()
                 break
             found = False
+            itrs += 1
+            attempts = 0
             for rep in clstr_reps:
+                attempts += 1
                 # get the index of the sequence with the highest score (from the current cluster)
                 if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                     best = self.max_score[rep][r][0]
@@ -386,9 +447,13 @@ class LSHCluster:
                         results.put((next_single, rep))
                         found = True
                         break
+            print("DEBUG- {} relabled: {}. Needed {} attempts.".format(next_single, found, attempts))
+            sum_amtps += attempts
             if not found:
                 tasks.task_done()  # Nothing was chosen for this single
                 results.put((next_single, -1))
+        if itrs != 0:
+            print("avg attmpts: {}".format(float(sum_amtps) / itrs))
         return
 
     def relable(self, r=0):
@@ -401,7 +466,7 @@ class LSHCluster:
         :return: the precent of relabled singles out of the total number of singles we began with.
         """
         time_start = time.time()
-        singles = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) == 1]
+        singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
         initial_singles = len(singles)
         if initial_singles == 0:
             return 0
@@ -453,7 +518,7 @@ class LSHCluster:
         time_start = time.time()
         relevant_centers = [center for center, clstr in self.C_til.items() if 1 <= len(clstr) <= 13]
         if len(relevant_centers) == 0: return self.C_til
-        for itr in range(repeats):
+        for _ in range(repeats):
             a = ''.join(random.choice('ACGT') for _ in range(w))
             singles = [random.choice(self.C_til[center]) for center in relevant_centers if len(self.C_til[center]) >= 1]
             common_substr_hash = []
@@ -555,6 +620,15 @@ class LSHCluster:
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        relabel_lin_begin = time.time()
+        for r in range(7):
+            print("Relabeling Linear %s:" % r)
+            success = lsh.relable_lin()
+            if accrcy:
+                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+            if success < 5 * STOP_RELABLE:
+                break
+        print("Time for all the relabeling linear step: {}".format(time.time() - relabel_lin_begin))
         relable_begin = time.time()
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
@@ -564,12 +638,8 @@ class LSHCluster:
             if success < STOP_RELABLE:
                 break
         print("Time for all the relabeling step: {}".format(time.time() - relable_begin))
-        print("Second common sub-string step:")
+        print("Common sub-string step:")
         lsh.common_substr_step()
-        if accrcy:
-            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        print("Splitting stage:")
-        lsh.splitter()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Total time (include init): {}".format(self.duration))
@@ -660,7 +730,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat50000.txt"
+    dataset = r"./datasets/evyat300000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
@@ -700,7 +770,9 @@ if __name__ == '__main__':
 
     # Test the clustering algorithm
     size = len([center for center, clstr in C_dict.items() if len(clstr) > 0])
+    singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("Input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
+    print("Out of them: {} are singles.".format(singles_num))
     debug = False
     lsh = LSHCluster(reads_err, q=6, k=3, m=50, L=32, debug=debug)
     lsh.run()
