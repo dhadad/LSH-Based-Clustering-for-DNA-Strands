@@ -300,7 +300,8 @@ class LSHCluster:
                         if elem == ref:
                             continue
                         sd = LSHCluster.sorensen_dice(self.numsets[ref], self.numsets[elem])
-                        if sd >= 0.38:
+                        if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
+                                                             LSHCluster.index(self.all_reads[elem])) <= 3):
                             res.add((ref, elem))
             tasks.task_done()
             results.put(res)
@@ -357,29 +358,31 @@ class LSHCluster:
 
     def relable_lin(self):
         tot = time.time()
-        k = self.k
-        focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
-        initial_singles = len(focus)
-        clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) > 1]
-        for rep in clstr_reps:
-            for r in range(2):
-                if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
-                    best = self.max_score[rep][r][0]
-                    focus.append(best)
-
-        # order?
-        random.shuffle(focus)
-
-        for itr in range(30):
+        initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+        for itr in range(200):
             time_start = time.time()
             sigs = {}
             self.buckets = {}
             pairs = set()
+
+            # reset data structures every 20 iterations
+            singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+            if itr % 20 == 0:
+                focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+                if singles_round_start == 0:
+                    break
+                clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1], reverse=True) if len(clstr) > 1]
+                r = random.choices([num for num in range(NUM_HEIGHEST)], [num for num in range(NUM_HEIGHEST, 0, -1)], k=1)[0]
+                for rep in clstr_reps:
+                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
+                        focus.append(self.max_score[rep][r][0])
+                random.shuffle(focus)
+
             # choose random k elements of the LSH signature
-            indexes = random.sample(range(self.m), k)
+            indexes = random.sample(range(self.m), self.k)
             for idx in focus:
                 # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(k))
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
                 sigs[idx] = sig
 
             for idx, sig in sigs.items():
@@ -387,31 +390,27 @@ class LSHCluster:
                     self.buckets[sig].append(idx)
                 else:
                     self.buckets[sig] = [idx]
+                    
+            for elems in self.buckets.values():
+                if len(elems) <= 1:
+                    continue
+                for elem in elems[1:]:
+                    sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
+                    if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[elem]),
+                                                             LSHCluster.index(self.all_reads[elems[0]])) <= 3):
+                        pairs.add((elems[0], elem))
 
-            tasks, results, processes = mp.JoinableQueue(), mp.Queue(), list()
-            for _ in range(self.jobs):
-                processes.append(mp.Process(target=self._handle_bucket, args=(tasks, results,)))
-            [p.start() for p in processes]
-            cnt = 0
-            for sig in self.buckets.keys():
-                if len(self.buckets[sig]) > 1:
-                    cnt += 1
-                    tasks.put(sig)
-            for _ in range(self.jobs):
-                tasks.put(None)     # poison pill
-
-            tasks.join()
-            for _ in range(cnt):
-                pairs = results.get()
-                for pair in pairs:
+            for pair in pairs:
                     self.score[pair[1]] += 1
                     self.score[pair[0]] += 1
                     self._add_pair(pair[0], pair[1])    
-            print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
-        final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
-        success_rate = float(initial_singles - final_singles) / initial_singles
-        self.duration += time.time() - time_start
+            singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+            working_rate = float(singles_round_start - singles_round_end) / singles_round_start
+            print("time for iteration {}: {}, rate: {}, using r={}".format(itr + 1, time.time() - time_start, working_rate, r))
+
+        success_rate = float(initial_singles - singles_round_end) / initial_singles
+        self.duration += time.time() - tot
         print("time for a 'relabel linear' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
         return success_rate
 
@@ -423,7 +422,7 @@ class LSHCluster:
         :param r: we store the the sequences with the best score in a cluster in order, so r=0 represents the
             best one, r=1 the one after it, and so on.
         """
-        clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1]) if len(clstr) > 1]
+        clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1], reverse=True) if len(clstr) > 1]
         sum_amtps = 0
         itrs = 0
         while True:
@@ -621,7 +620,7 @@ class LSHCluster:
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         relabel_lin_begin = time.time()
-        for r in range(7):
+        for r in range(1):
             print("Relabeling Linear %s:" % r)
             success = lsh.relable_lin()
             if accrcy:
@@ -730,7 +729,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat300000.txt"
+    dataset = r"./datasets/evyat100000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
