@@ -42,7 +42,7 @@ BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
 NUM_HEIGHEST = 4
 ADJ_DIFF_FACTOR = 8
-STOP_RELABLE = 0.01     # 1 precent
+STOP_RELABLE = 0.03     # 3 precent
 PRIORITZED = 0
 NOT_PRIORITZED = 1
 REF_PNTS = 12
@@ -359,19 +359,19 @@ class LSHCluster:
     def relable_lin(self):
         tot = time.time()
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-        for itr in range(200):
+        for itr in range(210):
             time_start = time.time()
             sigs = {}
             self.buckets = {}
             pairs = set()
 
-            # reset data structures every 20 iterations
+            # reset data structures every 30 iterations
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-            if itr % 20 == 0:
+            if itr % 30 == 0:
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 if singles_round_start == 0:
                     break
-                clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1], reverse=True) if len(clstr) > 1]
+                clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 r = random.choices([num for num in range(NUM_HEIGHEST)], [num for num in range(NUM_HEIGHEST, 0, -1)], k=1)[0]
                 for rep in clstr_reps:
                     if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
@@ -390,13 +390,13 @@ class LSHCluster:
                     self.buckets[sig].append(idx)
                 else:
                     self.buckets[sig] = [idx]
-                    
+
             for elems in self.buckets.values():
                 if len(elems) <= 1:
                     continue
                 for elem in elems[1:]:
                     sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
-                    if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[elem]),
+                    if sd >= 0.32 or (sd >= 0.28 and edit_dis(LSHCluster.index(self.all_reads[elem]),
                                                              LSHCluster.index(self.all_reads[elems[0]])) <= 3):
                         pairs.add((elems[0], elem))
 
@@ -430,11 +430,14 @@ class LSHCluster:
             if next_single is None:
                 tasks.task_done()
                 break
+            # time_crnt = time.time()
             found = False
             itrs += 1
             attempts = 0
             for rep in clstr_reps:
                 attempts += 1
+                # if rep % 100:
+                #    print("alive: {}".format(time.time()))
                 # get the index of the sequence with the highest score (from the current cluster)
                 if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                     best = self.max_score[rep][r][0]
@@ -482,7 +485,7 @@ class LSHCluster:
         for _ in range(self.jobs):
             tasks.put(None)     # poison pill
 
-        # inserting the pairs is done ins serial
+        # inserting the pairs is done in serial
         tasks.join()
         for _ in range(initial_singles):
             elem_1, elem_2 = results.get()
@@ -620,13 +623,10 @@ class LSHCluster:
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         relabel_lin_begin = time.time()
-        for r in range(1):
-            print("Relabeling Linear %s:" % r)
-            success = lsh.relable_lin()
-            if accrcy:
-                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-            if success < 5 * STOP_RELABLE:
-                break
+        print("Relabeling Linear %s:" % 0)
+        success = lsh.relable_lin()
+        if accrcy:
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Time for all the relabeling linear step: {}".format(time.time() - relabel_lin_begin))
         relable_begin = time.time()
         for r in range(NUM_HEIGHEST):
