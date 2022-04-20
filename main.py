@@ -6,6 +6,8 @@ import random
 import multiprocessing as mp
 from functools import lru_cache
 import numpy as np
+import queue
+import sys 
 
 try:
     from Levenshtein import distance
@@ -40,11 +42,9 @@ except ImportError:
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
-NUM_HEIGHEST = 4
+NUM_HEIGHEST = 7
 ADJ_DIFF_FACTOR = 8
-STOP_RELABLE = 0.03     # 3 precent
-PRIORITZED = 0
-NOT_PRIORITZED = 1
+STOP_RELABEL = 0.03     # 3 precent
 REF_PNTS = 12
 SPLIT_THRESHOLD = 9
 
@@ -287,6 +287,13 @@ class LSHCluster:
         self.max_score[rep] = sorted(clstr_sc, reverse=True, key=lambda x: x[1])[:NUM_HEIGHEST]
 
     def _handle_bucket(self, tasks, results):
+        """
+        The function serves as the target for worker threads created by the 'lsh_clustering' function. Each thread
+        is tasked with getting buckets from the queue, and for each bucket look for pairs of sequnces satisfying a
+        pre-determined condition. 
+        :param tasks: queue with signatures, serving as the buckets' keys.
+        :param results: queue for storing the results (pairs of sequnces)
+        """
         while True:
             sig = tasks.get()
             if sig is None:
@@ -356,27 +363,36 @@ class LSHCluster:
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
         return self.C_til
 
-    def relable_lin(self):
+    def relabel_lin(self):
+        """
+        Continue the clustering procedure by mimicing the flow of 'lsh_clustering', centering on the tackling singles.
+        For this end, instead of iterating over all the sequnces, we'll focus on singles and on constant number of 
+        representatives from the other clusters, thus having much shorter iterations, allowing a higher number of repeats.
+        :return: the precent of relabled singles out of the total number of singles we began with.
+        """
         tot = time.time()
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-        for itr in range(210):
+        r = 0
+        for itr in range(600):
             time_start = time.time()
             sigs = {}
             self.buckets = {}
             pairs = set()
-
             # reset data structures every 30 iterations
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+            if singles_round_start == 0:
+                break
             if itr % 30 == 0:
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 if singles_round_start == 0:
                     break
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
-                r = random.choices([num for num in range(NUM_HEIGHEST)], [num for num in range(NUM_HEIGHEST, 0, -1)], k=1)[0]
+                # r = random.choices([num for num in range(NUM_HEIGHEST)], [num for num in range(NUM_HEIGHEST, 0, -1)], k=1)[0]
+                r = (r + 1) % NUM_HEIGHEST
                 for rep in clstr_reps:
                     if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                         focus.append(self.max_score[rep][r][0])
-                random.shuffle(focus)
+            random.shuffle(focus)
 
             # choose random k elements of the LSH signature
             indexes = random.sample(range(self.m), self.k)
@@ -390,15 +406,19 @@ class LSHCluster:
                     self.buckets[sig].append(idx)
                 else:
                     self.buckets[sig] = [idx]
-
+            
             for elems in self.buckets.values():
                 if len(elems) <= 1:
                     continue
-                for elem in elems[1:]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
-                    if sd >= 0.32 or (sd >= 0.28 and edit_dis(LSHCluster.index(self.all_reads[elem]),
-                                                             LSHCluster.index(self.all_reads[elems[0]])) <= 3):
-                        pairs.add((elems[0], elem))
+                bucket_ref_points = random.choices(elems, k=2)
+                for ref in bucket_ref_points:
+                    for elem in elems:
+                        if elem == ref:
+                            continue
+                        sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
+                        if sd >= 0.26 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[elem]),
+                                                                LSHCluster.index(self.all_reads[elems[0]])) <= 3):
+                            pairs.add((elems[0], elem))
 
             for pair in pairs:
                     self.score[pair[1]] += 1
@@ -414,7 +434,7 @@ class LSHCluster:
         print("time for a 'relabel linear' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
         return success_rate
 
-    def _relable_given_singles(self, tasks, results, r=0):
+    def _relabel_given_singles(self, tasks, results, r=0):
         """
         Preforms the relabeling process, by one of the worker threads.
         :param tasks: queue with the singles left for scanning a cluster to match them to.
@@ -436,7 +456,7 @@ class LSHCluster:
             attempts = 0
             for rep in clstr_reps:
                 attempts += 1
-                # if rep % 100:
+                #if rep % 1000:
                 #    print("alive: {}".format(time.time()))
                 # get the index of the sequence with the highest score (from the current cluster)
                 if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
@@ -453,12 +473,11 @@ class LSHCluster:
             sum_amtps += attempts
             if not found:
                 tasks.task_done()  # Nothing was chosen for this single
-                results.put((next_single, -1))
         if itrs != 0:
             print("avg attmpts: {}".format(float(sum_amtps) / itrs))
         return
 
-    def relable(self, r=0):
+    def relabel(self, r=0):
         """
         Used AFTER we executed 'lsh_clustering'. The purpose is to handle single sequences (meaning, clusters of size 1).
         We'll iterate over those sequences, and look for the cluster whose most highly ranked sequence is similar to
@@ -478,7 +497,7 @@ class LSHCluster:
         results = mp.Queue()
         processes = []
         for _ in range(self.jobs):
-            processes.append(mp.Process(target=self._relable_given_singles, args=(tasks, results, r,)))
+            processes.append(mp.Process(target=self._relabel_given_singles, args=(tasks, results, r,)))
         [p.start() for p in processes]
         for single in singles:
             tasks.put(single)
@@ -487,11 +506,14 @@ class LSHCluster:
 
         # inserting the pairs is done in serial
         tasks.join()
-        for _ in range(initial_singles):
-            elem_1, elem_2 = results.get()
-            if elem_2 == -1:
-                continue
-            self._add_pair(elem_1, elem_2)
+        while True:
+            try:
+                elem_1, elem_2 = results.get_nowait()   # get_nowait() is non-blocking
+                self._add_pair(elem_1, elem_2)
+            except queue.Empty:
+                print("Emptied results queue.")
+                sys.stdout.flush()
+                break
         
         # information for deciding whether to continue to additional iterations
         final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
@@ -622,25 +644,23 @@ class LSHCluster:
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        relabel_lin_begin = time.time()
         print("Relabeling Linear %s:" % 0)
-        success = lsh.relable_lin()
+        success = lsh.relabel_lin()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        print("Time for all the relabeling linear step: {}".format(time.time() - relabel_lin_begin))
-        relable_begin = time.time()
-        for r in range(NUM_HEIGHEST):
-            print("Relabeling %s:" % r)
-            success = lsh.relable(r=r)
-            if accrcy:
-                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-            if success < STOP_RELABLE:
-                break
-        print("Time for all the relabeling step: {}".format(time.time() - relable_begin))
-        print("Common sub-string step:")
+        print("First common sub-string step:")
         lsh.common_substr_step()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        relabel_begin = time.time()
+        for r in range(NUM_HEIGHEST):
+            print("Relabeling %s:" % r)
+            success = lsh.relabel(r=r)
+            if accrcy:
+                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+            if success < STOP_RELABEL:
+                break
+        print("Time for all the regualr relabeling step: {}".format(time.time() - relabel_begin))
         print("Total time (include init): {}".format(self.duration))
 
 
