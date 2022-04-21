@@ -6,8 +6,6 @@ import random
 import multiprocessing as mp
 from functools import lru_cache
 import numpy as np
-import queue
-import sys 
 
 try:
     from Levenshtein import distance
@@ -42,7 +40,7 @@ except ImportError:
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
-NUM_HEIGHEST = 7
+NUM_HEIGHEST = 5
 ADJ_DIFF_FACTOR = 8
 STOP_RELABEL = 0.03     # 3 precent
 REF_PNTS = 12
@@ -178,11 +176,24 @@ class LSHCluster:
             tasks.put(idx)
         for _ in range(self.jobs):
             tasks.put(None)     # poison pill
-
+        '''
         tasks.join()
         for _ in range(len(self.all_reads)):
             idx, numset = results.get()
             self.numsets[idx] = numset
+        '''
+        liveprocs = list(processes)
+        while liveprocs:
+            try:
+                while 1:
+                    idx, numset = results.get_nowait()
+                    self.numsets[idx] = numset
+            except:
+                pass
+            if not results.empty():
+                continue
+            liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
+
         self.duration += time.time() - time_start
         print("time to create number set for each sequence: {}".format(time.time() - time_start))
 
@@ -230,11 +241,25 @@ class LSHCluster:
         for _ in range(self.jobs):
             tasks.put(None)     # poison pill
 
+        '''
         tasks.join()
         del self.perms      # no need to keep it
         for _ in range(len(self.all_reads)):
             idx, sig = results.get()
             self.lsh_sigs[idx] = sig
+        '''
+        liveprocs = list(processes)
+        while liveprocs:
+            try:
+                while 1:
+                    idx, sig = results.get_nowait()
+                    self.lsh_sigs[idx] = sig
+            except:
+                pass
+            if not results.empty():
+                continue
+            liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
+        del self.perms      # no need to keep it
         self.duration += time.time() - time_start
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
 
@@ -310,6 +335,9 @@ class LSHCluster:
                         if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
                                                              LSHCluster.index(self.all_reads[elem])) <= 3):
                             res.add((ref, elem))
+                            if len(res) > 3000:
+                                results.put(res)
+                                res = set()
             tasks.task_done()
             results.put(res)
         return        
@@ -351,7 +379,7 @@ class LSHCluster:
                     tasks.put(sig)
             for _ in range(self.jobs):
                 tasks.put(None)     # poison pill
-
+            '''
             tasks.join()
             for _ in range(cnt):
                 pairs = results.get()
@@ -359,6 +387,24 @@ class LSHCluster:
                     self.score[pair[1]] += 1
                     self.score[pair[0]] += 1
                     self._add_pair(pair[0], pair[1])    
+            '''
+            
+            liveprocs = list(processes)
+            while liveprocs:
+                try:
+                    while 1:
+                        pairs = results.get_nowait()
+                        for pair in pairs:
+                            self.score[pair[1]] += 1
+                            self.score[pair[0]] += 1
+                            self._add_pair(pair[0], pair[1])
+                except:
+                    pass
+                time.sleep(0.1)
+                if not results.empty():
+                    continue
+                liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
+
             self.duration += time.time() - time_start
             print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
         return self.C_til
@@ -373,7 +419,7 @@ class LSHCluster:
         tot = time.time()
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
         r = 0
-        for itr in range(600):
+        for itr in range(330):
             time_start = time.time()
             sigs = {}
             self.buckets = {}
@@ -505,6 +551,7 @@ class LSHCluster:
             tasks.put(None)     # poison pill
 
         # inserting the pairs is done in serial
+        '''
         tasks.join()
         while True:
             try:
@@ -514,7 +561,19 @@ class LSHCluster:
                 print("Emptied results queue.")
                 sys.stdout.flush()
                 break
-        
+        '''
+        liveprocs = list(processes)
+        while liveprocs:
+            try:
+                while 1:
+                    elem_1, elem_2 = results.get_nowait()
+                    self._add_pair(elem_1, elem_2)
+            except:
+                pass
+            if not results.empty():
+                continue
+            liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
+
         # information for deciding whether to continue to additional iterations
         final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
         success_rate = float(initial_singles - final_singles) / initial_singles
@@ -749,7 +808,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat100000.txt"
+    dataset = r"./datasets/evyat300000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
