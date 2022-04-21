@@ -6,8 +6,6 @@ import random
 import multiprocessing as mp
 from functools import lru_cache
 import numpy as np
-import queue
-import sys 
 
 try:
     from Levenshtein import distance
@@ -42,11 +40,14 @@ except ImportError:
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
-NUM_HEIGHEST = 7
+NUM_HEIGHEST = 4
 ADJ_DIFF_FACTOR = 8
 STOP_RELABEL = 0.03     # 3 precent
+PRIORITZED = 0
+NOT_PRIORITZED = 1
 REF_PNTS = 12
 SPLIT_THRESHOLD = 9
+TASK_GET_TIMEOUT = 1
 
 # **********************************
 #   Main class
@@ -181,7 +182,7 @@ class LSHCluster:
 
         tasks.join()
         for _ in range(len(self.all_reads)):
-            idx, numset = results.get()
+            idx, numset = results.get(timeout=TASK_GET_TIMEOUT)
             self.numsets[idx] = numset
         self.duration += time.time() - time_start
         print("time to create number set for each sequence: {}".format(time.time() - time_start))
@@ -233,7 +234,7 @@ class LSHCluster:
         tasks.join()
         del self.perms      # no need to keep it
         for _ in range(len(self.all_reads)):
-            idx, sig = results.get()
+            idx, sig = results.get(timeout=TASK_GET_TIMEOUT)
             self.lsh_sigs[idx] = sig
         self.duration += time.time() - time_start
         print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
@@ -287,13 +288,6 @@ class LSHCluster:
         self.max_score[rep] = sorted(clstr_sc, reverse=True, key=lambda x: x[1])[:NUM_HEIGHEST]
 
     def _handle_bucket(self, tasks, results):
-        """
-        The function serves as the target for worker threads created by the 'lsh_clustering' function. Each thread
-        is tasked with getting buckets from the queue, and for each bucket look for pairs of sequnces satisfying a
-        pre-determined condition. 
-        :param tasks: queue with signatures, serving as the buckets' keys.
-        :param results: queue for storing the results (pairs of sequnces)
-        """
         while True:
             sig = tasks.get()
             if sig is None:
@@ -364,16 +358,10 @@ class LSHCluster:
         return self.C_til
 
     def relabel_lin(self):
-        """
-        Continue the clustering procedure by mimicing the flow of 'lsh_clustering', centering on the tackling singles.
-        For this end, instead of iterating over all the sequnces, we'll focus on singles and on constant number of 
-        representatives from the other clusters, thus having much shorter iterations, allowing a higher number of repeats.
-        :return: the precent of relabled singles out of the total number of singles we began with.
-        """
         tot = time.time()
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
         r = 0
-        for itr in range(600):
+        for itr in range(330):
             time_start = time.time()
             sigs = {}
             self.buckets = {}
@@ -406,19 +394,15 @@ class LSHCluster:
                     self.buckets[sig].append(idx)
                 else:
                     self.buckets[sig] = [idx]
-            
+
             for elems in self.buckets.values():
                 if len(elems) <= 1:
                     continue
-                bucket_ref_points = random.choices(elems, k=2)
-                for ref in bucket_ref_points:
-                    for elem in elems:
-                        if elem == ref:
-                            continue
-                        sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
-                        if sd >= 0.26 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[elem]),
-                                                                LSHCluster.index(self.all_reads[elems[0]])) <= 3):
-                            pairs.add((elems[0], elem))
+                for elem in elems[1:]:
+                    sd = LSHCluster.sorensen_dice(self.numsets[elems[0]], self.numsets[elem])
+                    if sd >= 0.26 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[elem]),
+                                                             LSHCluster.index(self.all_reads[elems[0]])) <= 3):
+                        pairs.add((elems[0], elem))
 
             for pair in pairs:
                     self.score[pair[1]] += 1
@@ -446,8 +430,15 @@ class LSHCluster:
         sum_amtps = 0
         itrs = 0
         while True:
-            next_single = tasks.get()
-            if next_single is None:
+            err_cnt = 0
+            while err_cnt <= 7:
+                try:
+                    next_single = tasks.get(timeout=1)
+                    break
+                except Exception as err:
+                    print("On attempt {}, exception when getting from tasks queue: {}\n{}",format(err_cnt, str(type(err)), str(err)))
+                    err_cnt += 1
+            if next_single is None or next_single == 'STOP':
                 tasks.task_done()
                 break
             # time_crnt = time.time()
@@ -473,6 +464,7 @@ class LSHCluster:
             sum_amtps += attempts
             if not found:
                 tasks.task_done()  # Nothing was chosen for this single
+                results.put((next_single, -1))
         if itrs != 0:
             print("avg attmpts: {}".format(float(sum_amtps) / itrs))
         return
@@ -502,18 +494,18 @@ class LSHCluster:
         for single in singles:
             tasks.put(single)
         for _ in range(self.jobs):
-            tasks.put(None)     # poison pill
+            tasks.put('STOP')     # poison pill
 
         # inserting the pairs is done in serial
         tasks.join()
-        while True:
+        for _ in range(initial_singles):
             try:
-                elem_1, elem_2 = results.get_nowait()   # get_nowait() is non-blocking
+                elem_1, elem_2 = results.get(timeout=TASK_GET_TIMEOUT)
+                if elem_2 == -1:
+                    continue
                 self._add_pair(elem_1, elem_2)
-            except queue.Empty:
-                print("Emptied results queue.")
-                sys.stdout.flush()
-                break
+            except Exception as err:
+                print("Recieved an error while getting item from results queue: {}\n{}".format(str(type(err)), str))
         
         # information for deciding whether to continue to additional iterations
         final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
@@ -660,7 +652,11 @@ class LSHCluster:
                 print_accrcy(self.C_til, C_dict, C_reps, reads_err)
             if success < STOP_RELABEL:
                 break
-        print("Time for all the regualr relabeling step: {}".format(time.time() - relabel_begin))
+        print("Time for all the relabeling step: {}".format(time.time() - relabel_begin))
+        print("Common sub-string step:")
+        lsh.common_substr_step()
+        if accrcy:
+            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Total time (include init): {}".format(self.duration))
 
 
@@ -749,7 +745,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat100000.txt"
+    dataset = r"./datasets/evyat300000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
