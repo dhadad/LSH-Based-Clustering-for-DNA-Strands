@@ -11,12 +11,12 @@ import sys
 try:
     from Levenshtein import distance
     print("INFO: using external library edit distance")
-    @lru_cache
+    # @lru_cache
     def edit_dis(s1, s2):
         return distance(s1, s2)
 except ImportError:
     print("INFO: using our implementation of edit distance")
-    @lru_cache
+    # @lru_cache
     def edit_dis(s1, s2):
         """
         Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
@@ -72,7 +72,7 @@ class LSHCluster:
         self.L = L
         self.top = 4 ** q
         self.jobs = mp.cpu_count() - 1
-        print("# CPU's to be used: {}".format(self.jobs))
+        print("# CPU's to be used: {}".format(self.jobs + 1)) # for 1 for main thread
         self.debug = debug
         self.duration = 0
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
@@ -321,7 +321,7 @@ class LSHCluster:
                         if elem == ref:
                             continue
                         sd = LSHCluster.sorensen_dice(self.numsets[ref], self.numsets[elem])
-                        if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
+                        if sd >= 0.36 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
                                                              LSHCluster.index(self.all_reads[elem])) <= 3):
                             res.add((ref, elem))
                             if len(res) > 3000:
@@ -429,15 +429,14 @@ class LSHCluster:
         tot = time.time()
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
         r = -1
-        for itr in range(480):
+        for itr in range(1000):
             time_start = time.time()
             sigs = list()
-
-            # reset data structures every 30 iterations
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             if singles_round_start == 0:
                 break
-            if itr % 30 == 0:
+            # reset data structures every 10 iterations
+            if itr % 10 == 0:
                 r = (r + 1) % NUM_HEIGHEST
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 if singles_round_start == 0:
@@ -456,6 +455,7 @@ class LSHCluster:
                 sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
                 sigs.append((idx, sig))
 
+            
             sigs.sort(key=lambda x: x[1])
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a+1][1]:
@@ -468,8 +468,7 @@ class LSHCluster:
 
             singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            print("time for iteration {}: {}, rate: {}, using r={}".format(itr + 1, time.time() - time_start, working_rate, r))
-            sys.stdout.flush()
+            print("{} | {} s | rate: {} | r={} | first={} | end={}".format(itr + 1, time.time() - time_start, working_rate, r , singles_round_start, singles_round_end))
 
         success_rate = float(initial_singles - singles_round_end) / initial_singles
         self.duration += time.time() - tot
@@ -529,7 +528,7 @@ class LSHCluster:
 
         # scanning for pairs will be excuted in paralel
         tasks = mp.JoinableQueue()
-        results = mp.Queue()
+        results = mp.Queue(maxsize=QSIZE)
         processes = []
         for _ in range(self.jobs):
             processes.append(mp.Process(target=self._relabel_given_singles, args=(tasks, results, r,)))
@@ -601,77 +600,6 @@ class LSHCluster:
                                        update_maxscore=True)
         self.duration += time.time() - time_start
         print("Common sub-string step took: {}".format(time.time() - time_start))
-        return self.C_til
-
-    def avg_index(self, clstr):
-        """
-        Approximate a index (prefix of size INDEX_LEN) for a given cluster. Uses majority voting.
-        :param clstr: list of integers, each one is refers to a sequence in self.all_reads.
-        :returns: a string of size INDEX_LEN, which should represent the average index of the given cluster
-        """
-        prefix = ['A'] * INDEX_LEN
-        for i in range(len(prefix)):
-            hist = {'A': 0, 'C': 0, 'T': 0, 'G': 0}
-            for elem in clstr:
-                hist[self.all_reads[elem][i]] += 1
-            prefix[i] = max(hist, key=hist.get)
-        return ''.join(prefix)
-
-    def splitter(self, split_singles=False, update_maxscore=True):
-        """
-        The method's aim is to go through all the clusters and to split clusters where it is highly likely we
-        merged two true clusters into one.
-        To be used only after self.run() finished executing.
-        :param update_maxscore: boolean, determine whether to update the self.max_score structure. There's no point
-            suffering from the overhead if the splitter will be used a last step in the algorithm. Otherwise, you'd
-            probably want the self.max_score to store the real values, for having self._add_pair() working properly.
-        :return: the updated C_til
-        """
-        tot = time.time()
-        cnt = 0
-        for rep in self.C_til.keys():
-            if len(self.C_til[rep]) < 3:
-                continue
-            # arrange the sequences according to their score, sorted
-            best = self.max_score[rep][0][0]
-            axis = [(seq_ind, self.sorensen_dice(self.numsets[best], self.numsets[seq_ind]))
-                    for seq_ind in self.C_til[rep] if seq_ind != best]
-            axis.sort(key=lambda x: x[1])
-
-            # detect if the axis consist of two separate groups
-            avg_diff = float(0)
-            for ind in range(len(axis) - 1):
-                avg_diff += axis[ind + 1][1] - axis[ind][1]
-            avg_diff /= (len(axis) - 1)
-            max_diff, ind_max_diff = 0, -1
-            for ind in range(len(axis) - 1):
-                cur_diff = axis[ind + 1][1] - axis[ind][1]
-                if cur_diff > max_diff:
-                    max_diff = cur_diff
-                    ind_max_diff = ind
-            if ind_max_diff == -1 or (not split_singles and (ind_max_diff == 0 or ind_max_diff == len(axis) - 2)):
-                continue
-
-            # splitting
-            if max_diff >= ADJ_DIFF_FACTOR * avg_diff:
-                clstr_1 = [axis[ind][0] for ind in range(ind_max_diff + 1)]
-                clstr_2 = [axis[ind][0] for ind in range(ind_max_diff + 1, len(axis))]
-                diff_clstrs = edit_dis(self.avg_index(clstr_1), self.avg_index(clstr_2))
-                if diff_clstrs >= SPLIT_THRESHOLD:
-                    cnt += 1
-                    if rep in clstr_1:
-                        self.C_til[rep] = clstr_1
-                        self.C_til[clstr_2[0]] = clstr_2
-                        other_rep = clstr_2[0]
-                    else:
-                        self.C_til[rep] = clstr_2
-                        self.C_til[clstr_1[0]] = clstr_1
-                        other_rep = clstr_1[0]
-                    if update_maxscore:
-                        self.update_maxscore(rep)
-                        self.update_maxscore(other_rep)
-
-        print("Total time for splitting {} clusters: {}".format(cnt, time.time() - tot))
         return self.C_til
 
     def run(self, accrcy=True):
@@ -774,7 +702,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat100000.txt"
+    dataset = r"./datasets/evyat300000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
@@ -818,5 +746,5 @@ if __name__ == '__main__':
     print("Input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("Out of them: {} are singles.".format(singles_num))
     debug = False
-    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=32, debug=debug)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=26, debug=debug)
     lsh.run()
