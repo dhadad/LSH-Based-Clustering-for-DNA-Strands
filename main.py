@@ -6,17 +6,16 @@ import random
 import multiprocessing as mp
 from functools import lru_cache
 import numpy as np
-import sys
 
 try:
     from Levenshtein import distance
     print("INFO: using external library edit distance")
-    # @lru_cache
+    @lru_cache
     def edit_dis(s1, s2):
         return distance(s1, s2)
 except ImportError:
     print("INFO: using our implementation of edit distance")
-    # @lru_cache
+    @lru_cache
     def edit_dis(s1, s2):
         """
         Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
@@ -48,6 +47,9 @@ REF_PNTS = 12
 SPLIT_THRESHOLD = 9
 TO = 0.1
 QSIZE = 2500000     # 2.5 milion
+RESULTS_CHUNK = 3000
+WORK_IN_BAD_ROUND = 4
+ALLOWED_BAD_ROUNDS = 9
 
 # **********************************
 #   Main class
@@ -321,10 +323,10 @@ class LSHCluster:
                         if elem == ref:
                             continue
                         sd = LSHCluster.sorensen_dice(self.numsets[ref], self.numsets[elem])
-                        if sd >= 0.36 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
+                        if sd >= 0.35 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
                                                              LSHCluster.index(self.all_reads[elem])) <= 3):
                             res.add((ref, elem))
-                            if len(res) > 3000:
+                            if len(res) > RESULTS_CHUNK:
                                 results.put(res)
                                 res = set()
             tasks.task_done()
@@ -429,7 +431,8 @@ class LSHCluster:
         tot = time.time()
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
         r = -1
-        for itr in range(1000):
+        bad_rounds = 0
+        for itr in range(1500):
             time_start = time.time()
             sigs = list()
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
@@ -442,7 +445,6 @@ class LSHCluster:
                 if singles_round_start == 0:
                     break
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
-                # r = random.choices([num for num in range(NUM_HEIGHEST)], [num for num in range(NUM_HEIGHEST, 0, -1)], k=1)[0]
                 for rep in clstr_reps:
                     if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                         focus.append(self.max_score[rep][r][0])
@@ -454,8 +456,7 @@ class LSHCluster:
                 # represent the sig as a single integer
                 sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
                 sigs.append((idx, sig))
-
-            
+           
             sigs.sort(key=lambda x: x[1])
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a+1][1]:
@@ -468,8 +469,15 @@ class LSHCluster:
 
             singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            print("{} | {} s | rate: {} | r={} | first={} | end={}".format(itr + 1, time.time() - time_start, working_rate, r , singles_round_start, singles_round_end))
-
+            print("{} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1, time.time() - time_start, working_rate, r , singles_round_start, singles_round_end, singles_round_start-singles_round_end))
+            if singles_round_start - singles_round_end <= WORK_IN_BAD_ROUND:
+                bad_rounds += 1
+            else:
+                bad_rounds = 0
+            if bad_rounds >= ALLOWED_BAD_ROUNDS:
+                print("enough bad rounds in a row, finish secondary step")
+                break
+            
         success_rate = float(initial_singles - singles_round_end) / initial_singles
         self.duration += time.time() - tot
         print("time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
@@ -502,7 +510,7 @@ class LSHCluster:
                                                               LSHCluster.index(self.all_reads[best])) <= 3):
                         tasks.task_done()
                         res.add((next_single, rep))
-                        if len(res) > 3000:
+                        if len(res) > RESULTS_CHUNK:
                             results.put(res)
                             res = set()
                         found = True
