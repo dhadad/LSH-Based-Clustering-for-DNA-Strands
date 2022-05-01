@@ -44,9 +44,7 @@ NUM_HEIGHEST = 5
 ADJ_DIFF_FACTOR = 8
 STOP_RELABEL = 0.03     # 3 precent
 REF_PNTS = 12
-SPLIT_THRESHOLD = 9
-TO = 0.1
-QSIZE = 2500000     # 2.5 milion
+QSIZE = 2500000         # 2.5 milion
 RESULTS_CHUNK = 3000
 WORK_IN_BAD_ROUND = 4
 ALLOWED_BAD_ROUNDS = 9
@@ -56,7 +54,7 @@ ALLOWED_BAD_ROUNDS = 9
 # **********************************
 
 class LSHCluster:
-    def __init__(self, all_reads, q, k, m, L, debug=False):
+    def __init__(self, all_reads, q, k, m, L):
         """
         Initiate an object dedicated for clustering the DNA sequences in 'all_reads'.
         The function just makes ready the necessary data structures. For the starting the clustering
@@ -73,10 +71,9 @@ class LSHCluster:
         self.m = m
         self.L = L
         self.top = 4 ** q
-        self.jobs = mp.cpu_count() - 1
-        print("# CPU's to be used: {}".format(self.jobs + 1)) # for 1 for main thread
-        self.debug = debug
-        self.duration = 0
+        self.jobs = int(mp.cpu_count() / 2)
+        print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
+        self.duration = 0                                           # sum of the all the calculations
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
@@ -139,6 +136,12 @@ class LSHCluster:
         return 2 * float(intersection) / (len(numset_1) + len(numset_2))
     
     def _single_numset(self, seq, q):
+        """
+        Creates a list of integers from 0 to 4**q representing the sequnce (instead of using alphabet of size 4)
+        :param seq: integer, index of a sequnce
+        :param q: the size of Q-grams.
+        :returns: a list of integers, the numbers set representing the sequnce.
+        """
         numset = []
         for idx in range(len(self.all_reads[seq]) - q + 1):
             sub = self.all_reads[seq][idx:idx + q]
@@ -153,7 +156,6 @@ class LSHCluster:
         A single number set generation.
         :param tasks: queue with the indices of the sequences (as part of 'all_reads') we want to calculate a number set for.
         :param results: queue for storing the results (the pairs of an index and a number set (represented as a list))
-        :return: a string
         """      
         while True:
             seq_idx = tasks.get()
@@ -193,7 +195,7 @@ class LSHCluster:
                 continue
             liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join    
         self.duration += time.time() - time_start
-        print("time to create number set for each sequence: {}".format(time.time() - time_start))
+        print("-INFO: time to create number set for each sequence: {}".format(time.time() - time_start))
 
     def _create_lsh_sig(self, tasks, results):
         """
@@ -221,7 +223,7 @@ class LSHCluster:
 
     def _lsh_sigs(self):
         """
-        Calculate the LSH signature of all the sequences in the input
+        Calculate the LSH signatures of all the sequences in the input.
         """
         time_start = time.time()
         # generate m permutations.
@@ -246,21 +248,21 @@ class LSHCluster:
                     self.lsh_sigs[idx] = sig
             except:
                 pass
-            # time.sleep(0.1)
             if not results.empty():
                 continue
             liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
         del self.perms      # no need to keep it
         self.duration += time.time() - time_start
-        print("time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
+        print("-INFO: time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
 
     def _add_pair(self, elem_1, elem_2, update_maxscore=True):
         """
-        "Adding a pair" is interpreted as merging the clusters of the two sequences given. If both are in
+        "Adding a pair" is interpreted as merging the clusters of the two given sequences. If both are in
         the same cluster already, no effect. Otherwise: the union of the two clusters will have as its "center"
         the minimal parent's index of the two input sequences.
         Also, the function is in charge of updating the 'max_score' struct.
         :param elem_1, elem_2: the indices of two sequences in all_reads.
+        :param update_maxscore: update the lists of the items with highest score in the cluster.
         """
         p1 = self.rep_find(elem_1)
         p2 = self.rep_find(elem_2)
@@ -383,16 +385,9 @@ class LSHCluster:
                     continue
                 liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
             self.duration += time.time() - time_start
-            print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
-            del sigs
-            del self.buckets
-            del pairs
-            del tasks
-            del results
-            del processes
-            del liveprocs
+            print("-INFO: time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
-    def lsh_clustering_new_draft(self):
+    def lsh_clustering_new_draft(self):     
         """
         Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
         signature for each, and finally iterate L times looking for matching pairs, to be inserted to the
@@ -419,7 +414,7 @@ class LSHCluster:
                         self._add_pair(sigs[a][0], sigs[a+1][0])
 
             self.duration += time.time() - time_start
-            print("time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
+            print("-INFO: time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
     def reduced_clustering(self):
         """
@@ -469,18 +464,18 @@ class LSHCluster:
 
             singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            print("{} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1, time.time() - time_start, working_rate, r , singles_round_start, singles_round_end, singles_round_start-singles_round_end))
+            print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1, time.time() - time_start, working_rate, r , singles_round_start, singles_round_end, singles_round_start-singles_round_end))
             if singles_round_start - singles_round_end <= WORK_IN_BAD_ROUND:
                 bad_rounds += 1
             else:
                 bad_rounds = 0
             if bad_rounds >= ALLOWED_BAD_ROUNDS:
-                print("enough bad rounds in a row, finish secondary step")
+                print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
                 break
             
         success_rate = float(initial_singles - singles_round_end) / initial_singles
         self.duration += time.time() - tot
-        print("time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
+        print("-INFO: time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
         return success_rate
 
     def _relabel_given_singles(self, tasks, results, r=0):
@@ -566,7 +561,7 @@ class LSHCluster:
         final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
         success_rate = float(initial_singles - final_singles) / initial_singles
         self.duration += time.time() - time_start
-        print("Time for relabeling step {}: {}. Success rate: {}".format(r, time.time() - time_start, success_rate))
+        print("-INFO: Time for relabeling step {}: {}. Success rate: {}".format(r, time.time() - time_start, success_rate))
         return success_rate
 
     def common_substr_step(self, w=3, t=4, repeats=220):
@@ -607,7 +602,7 @@ class LSHCluster:
                         self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0],
                                        update_maxscore=True)
         self.duration += time.time() - time_start
-        print("Common sub-string step took: {}".format(time.time() - time_start))
+        print("-INFO: Common sub-string step took: {}".format(time.time() - time_start))
         return self.C_til
 
     def run(self, accrcy=True):
@@ -616,15 +611,14 @@ class LSHCluster:
         :param accrcy: True for printing accuracy results. False otherwise.
         """
         lsh_begin = time.time()
-        # self.lsh_clustering()
         self.lsh_clustering()
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Reduced clustering step:")
-        success = lsh.reduced_clustering()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+        '''
         relabel_begin = time.time()
         for r in range(NUM_HEIGHEST):
             print("Relabeling %s:" % r)
@@ -634,6 +628,7 @@ class LSHCluster:
             if success < STOP_RELABEL:
                 break
         print("Time for all the regualr relabeling step: {}".format(time.time() - relabel_begin))
+        '''
         print("Total time (include init): {}".format(self.duration))
 
 
@@ -753,6 +748,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("Input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("Out of them: {} are singles.".format(singles_num))
-    debug = False
-    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=26, debug=debug)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=26)
     lsh.run()
