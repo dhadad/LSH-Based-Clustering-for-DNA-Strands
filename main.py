@@ -4,18 +4,14 @@
 import time
 import random
 import multiprocessing as mp
-from functools import lru_cache
-import numpy as np
 
 try:
     from Levenshtein import distance
     print("INFO: using external library edit distance")
-    @lru_cache
     def edit_dis(s1, s2):
         return distance(s1, s2)
 except ImportError:
     print("INFO: using our implementation of edit distance")
-    @lru_cache
     def edit_dis(s1, s2):
         """
         Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
@@ -81,10 +77,10 @@ class LSHCluster:
         self.max_score = [[(idx, 0)] for idx in range(len(all_reads))]
 
         # array for tracking the scores
-        self.score = np.array([0 for _ in range(len(all_reads))])
+        self.score = [0 for _ in range(len(all_reads))]
 
         # mapping between a sequence's index to it's parent's index
-        self.parent = np.array([idx for idx in range(len(all_reads))])
+        self.parent = [idx for idx in range(len(all_reads))]
 
         # calculate singatures upon initializing the object
         self.perms = list()
@@ -616,6 +612,7 @@ class LSHCluster:
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Reduced clustering step:")
+        self.reduced_clustering()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         '''
