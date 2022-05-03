@@ -44,6 +44,7 @@ QSIZE = 2500000         # 2.5 milion
 RESULTS_CHUNK = 3000
 WORK_IN_BAD_ROUND = 4
 ALLOWED_BAD_ROUNDS = 9
+REDUCED_ITERS_FOR_LINE = 1.7 * 10 ^ (-4)
 
 # **********************************
 #   Main class
@@ -66,10 +67,14 @@ class LSHCluster:
         self.k = k
         self.m = m
         self.L = L
-        self.top = 4 ** q
-        self.jobs = int(mp.cpu_count() / 2)
-        print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
+        self.top = 4 ** q                                           # upper boundry for items in numsets
         self.duration = 0                                           # sum of the all the calculations
+        self.jobs = max(int(mp.cpu_count() / 2), 1)
+        print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
+
+        self.max_reduced_iters = REDUCED_ITERS_FOR_LINE * len(self.all_reads)
+        print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(self.max_reduced_iters))
+
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
@@ -404,7 +409,7 @@ class LSHCluster:
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a+1][1]:
                     sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a+1][0]])
-                    if sd >= 0.38 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]), LSHCluster.index(self.all_reads[sigs[a+1][0]])) <= 3):
+                    if sd >= 0.36 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]), LSHCluster.index(self.all_reads[sigs[a+1][0]])) <= 3):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a+1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a+1][0])
@@ -423,7 +428,7 @@ class LSHCluster:
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
         r = -1
         bad_rounds = 0
-        for itr in range(1500):
+        for itr in range(self.max_reduced_iters):
             time_start = time.time()
             sigs = list()
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
@@ -615,17 +620,6 @@ class LSHCluster:
         self.reduced_clustering()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-        '''
-        relabel_begin = time.time()
-        for r in range(NUM_HEIGHEST):
-            print("Relabeling %s:" % r)
-            success = lsh.relabel(r=r)
-            if accrcy:
-                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-            if success < STOP_RELABEL:
-                break
-        print("Time for all the regualr relabeling step: {}".format(time.time() - relabel_begin))
-        '''
         print("Total time (include init): {}".format(self.duration))
 
 
@@ -702,7 +696,7 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
 
 if __name__ == '__main__':
     reads_cl = []
-    dataset = r"./datasets/evyat300000.txt"
+    dataset = r"./datasets/evyat500000.txt"
     with open(dataset) as f:
         print("Using dataset: {}".format(dataset))
         for line in f:
