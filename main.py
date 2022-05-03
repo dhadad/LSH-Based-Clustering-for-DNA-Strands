@@ -44,7 +44,7 @@ QSIZE = 2500000         # 2.5 milion
 RESULTS_CHUNK = 3000
 WORK_IN_BAD_ROUND = 4
 ALLOWED_BAD_ROUNDS = 9
-REDUCED_ITERS_FOR_LINE = 1.7 * 10 ^ (-4)
+REDUCED_ITERS_FOR_LINE = 1.7 * 10 ** (-4)
 
 # **********************************
 #   Main class
