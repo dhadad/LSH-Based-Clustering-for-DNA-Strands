@@ -40,13 +40,14 @@ BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
 NUM_HEIGHEST = 5
 ADJ_DIFF_FACTOR = 8
-STOP_RELABEL = 0.03     # 3 percent
+STOP_RELABEL = 0.03         # 3 percent
 REF_PNTS = 12
-QSIZE = 15000000        # 15 million
+QSIZE = 2000000             # 2 million
 RESULTS_CHUNK = 3000
 WORK_IN_BAD_ROUND = 4
 ALLOWED_BAD_ROUNDS = 9
 REDUCED_ITERS_FOR_LINE = 2 * 10 ** (-4)
+MIN_REDUCED_ITERS = 100
 
 
 # **********************************
@@ -72,11 +73,11 @@ class LSHCluster:
         self.L = L
         self.top = 4 ** q  # upper boundary for items in numsets
         self.duration = 0  # sum of the all the calculations
-        self.jobs = max(int(mp.cpu_count() * (2/3)), 1)
+        self.jobs = max(int(mp.cpu_count() * (2/5)), 1)
         print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
         self.buckets = None
 
-        self.max_reduced_iters = int(REDUCED_ITERS_FOR_LINE * len(self.all_reads))
+        self.max_reduced_iters = max(MIN_REDUCED_ITERS, int(REDUCED_ITERS_FOR_LINE * len(self.all_reads)))
         print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(self.max_reduced_iters))
 
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
@@ -391,6 +392,7 @@ class LSHCluster:
                             self._add_pair(pair[0], pair[1])
                 except queue.Empty:
                     pass
+                time.sleep(0.05)
                 if not results.empty():
                     continue
                 liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
