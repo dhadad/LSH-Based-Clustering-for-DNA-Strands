@@ -33,22 +33,22 @@ except ImportError:
                 tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
         return tbl[i, j]
 
+
 # **********************************
 #   Globals
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
 NUM_HEIGHEST = 5
-ADJ_DIFF_FACTOR = 8
-STOP_RELABEL = 0.03         # 3 percent
+STOP_RELABEL = 0.03
 REF_PNTS = 12
-QSIZE = 2000000             # 2 million
-RESULTS_CHUNK = 3000
+QSIZE = 2200000
+RESULTS_CHUNK = 2500
 WORK_IN_BAD_ROUND = 4
 ALLOWED_BAD_ROUNDS = 9
-REDUCED_ITERS_FOR_LINE = 2 * 10 ** (-4)
+REDUCED_ITERS_FOR_LINE = 2.2 * 10 ** (-4)
 MIN_REDUCED_ITERS = 100
-
+SLEEP_BEFORE_TRY = 0.03
 
 # **********************************
 #   Main class
@@ -183,7 +183,7 @@ class LSHCluster:
 
         time_start = time.time()
         tasks = mp.JoinableQueue()
-        results = mp.Queue()
+        results = mp.Queue(maxsize=QSIZE)
         processes = []
         for _ in range(self.jobs):
             processes.append(mp.Process(target=_create_numset, args=(tasks, results,)))
@@ -195,11 +195,12 @@ class LSHCluster:
         liveprocs = list(processes)
         while liveprocs:
             try:
-                while 1:
+                while True:
                     idx, numset = results.get_nowait()
                     self.numsets[idx] = numset
             except queue.Empty:
                 pass
+            time.sleep(SLEEP_BEFORE_TRY)
             if not results.empty():
                 continue
             liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
@@ -244,7 +245,7 @@ class LSHCluster:
             random.shuffle(vals)
             self.perms.append(vals.copy())
         # LSH signature tuple (size m, instead of k, as the original paper suggests) for each sequence
-        tasks, results, processes = mp.JoinableQueue(), mp.Queue(), list()
+        tasks, results, processes = mp.JoinableQueue(), mp.Queue(maxsize=QSIZE), list()
         for _ in range(self.jobs):
             processes.append(mp.Process(target=_create_lsh_sig, args=(tasks, results,)))
         [p.start() for p in processes]
@@ -255,11 +256,12 @@ class LSHCluster:
         liveprocs = list(processes)
         while liveprocs:
             try:
-                while 1:
+                while True:
                     idx, sig = results.get_nowait()
                     self.lsh_sigs[idx] = sig
             except queue.Empty:
                 pass
+            time.sleep(SLEEP_BEFORE_TRY)
             if not results.empty():
                 continue
             liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
@@ -384,7 +386,7 @@ class LSHCluster:
             liveprocs = list(processes)
             while liveprocs:
                 try:
-                    while 1:
+                    while True:
                         pairs = results.get_nowait()
                         for pair in pairs:
                             self.score[pair[1]] += 1
@@ -392,7 +394,7 @@ class LSHCluster:
                             self._add_pair(pair[0], pair[1])
                 except queue.Empty:
                     pass
-                time.sleep(0.05)
+                time.sleep(SLEEP_BEFORE_TRY)
                 if not results.empty():
                     continue
                 liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
@@ -416,7 +418,19 @@ class LSHCluster:
                 # represent the sig as a single integer
                 sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
                 sigs.append((idx, sig))
-
+            sigs.sort(key=lambda x: (x[1], -self.score[x[0]]))
+            ref = 0
+            for a in range(1, len(sigs)):
+                if sigs[a-1][1] != sigs[a][1]:
+                    ref = a
+                else:
+                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[ref][0]])
+                    if sd >= 0.36 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
+                                                             LSHCluster.index(self.all_reads[sigs[ref][0]])) <= 3):
+                        self.score[sigs[a][0]] += 1
+                        self.score[sigs[ref][0]] += 1
+                        self._add_pair(sigs[a][0], sigs[ref][0])
+            '''
             sigs.sort(key=lambda x: x[1])
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
@@ -426,7 +440,7 @@ class LSHCluster:
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
-
+            '''
             self.duration += time.time() - time_start
             print("-INFO: time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
@@ -564,7 +578,7 @@ class LSHCluster:
         liveprocs = list(processes)
         while liveprocs:
             try:
-                while 1:
+                while True:
                     pairs = results.get_nowait()
                     for pair in pairs:
                         self.score[pair[1]] += 1
