@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # **********************************
-#   Imports & Auxiliary functions
+#   Imports 
 # **********************************
 import argparse
 import time
@@ -8,34 +8,9 @@ import random
 import multiprocessing as mp
 import queue
 
-try:
-    from Levenshtein import distance
-    print("-INFO: using external library edit distance")
-    def edit_dis(s1, s2):
-        return distance(s1, s2)
-except ImportError:
-    print("-INFO: using our implementation of edit distance")
-    def edit_dis(s1, s2):
-        """
-        Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
-        :param s1, s2: the two strings to get the distance between.
-        """
-        if not s1 or not s2:
-            return float('inf')
-        tbl = {}
-        for i in range(len(s1) + 1):
-            tbl[i, 0] = i
-        for j in range(len(s2) + 1):
-            tbl[0, j] = j
-        for i in range(1, len(s1) + 1):
-            for j in range(1, len(s2) + 1):
-                cost = 0 if s1[i - 1] == s2[j - 1] else 1
-                tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
-        return tbl[i, j]
-
 
 # **********************************
-#   Globals
+#   Globals & Auxiliary functions
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
@@ -49,6 +24,25 @@ ALLOWED_BAD_ROUNDS = 9
 REDUCED_ITERS_FOR_LINE = 2.2 * 10 ** (-4)
 MIN_REDUCED_ITERS = 100
 SLEEP_BEFORE_TRY = 0.03
+
+def edit_dis(s1, s2):
+    """
+    Fully calculate the edit distance between two sequences. O(n^2) using dynamic programming.
+    :param s1, s2: the two strings to get the distance between.
+    """
+    if not s1 or not s2:
+        return float('inf')
+    tbl = {}
+    for i in range(len(s1) + 1):
+        tbl[i, 0] = i
+    for j in range(len(s2) + 1):
+        tbl[0, j] = j
+    for i in range(1, len(s1) + 1):
+        for j in range(1, len(s2) + 1):
+            cost = 0 if s1[i - 1] == s2[j - 1] else 1
+            tbl[i, j] = min(tbl[i, j - 1] + 1, tbl[i - 1, j] + 1, tbl[i - 1, j - 1] + cost)
+    return tbl[i, j]
+
 
 # **********************************
 #   Main class
@@ -183,7 +177,7 @@ class LSHCluster:
 
         time_start = time.time()
         tasks = mp.JoinableQueue()
-        results = mp.Queue(maxsize=QSIZE)
+        results = mp.Queue()
         processes = []
         for _ in range(self.jobs):
             processes.append(mp.Process(target=_create_numset, args=(tasks, results,)))
@@ -290,33 +284,24 @@ class LSHCluster:
             self.parent[merged] = center
 
             # update max_score:
-            if not update_maxscore:
-                return
-            both_max_score = self.max_score[center] + self.max_score[merged]  # two lists
-            found_1, found_2 = False, False
-            for j in range(len(both_max_score)):
-                if both_max_score[j][0] == elem_1:
-                    both_max_score[j] = (elem_1, self.score[elem_1])
-                    found_1 = True
-                elif both_max_score[j][0] == elem_2:
-                    both_max_score[j] = (elem_2, self.score[elem_2])
-                    found_2 = True
-            if not found_1:
-                both_max_score.append((elem_1, self.score[elem_1]))
-            if not found_2:
-                both_max_score.append((elem_2, self.score[elem_2]))
+            if update_maxscore:
+                both_max_score = self.max_score[center] + self.max_score[merged]  # two lists
+                found_1, found_2 = False, False
+                for j in range(len(both_max_score)):
+                    if both_max_score[j][0] == elem_1:
+                        both_max_score[j] = (elem_1, self.score[elem_1])
+                        found_1 = True
+                    elif both_max_score[j][0] == elem_2:
+                        both_max_score[j] = (elem_2, self.score[elem_2])
+                        found_2 = True
+                if not found_1:
+                    both_max_score.append((elem_1, self.score[elem_1]))
+                if not found_2:
+                    both_max_score.append((elem_2, self.score[elem_2]))
 
-            both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:NUM_HEIGHEST]
-            self.max_score[merged] = [tuple()]
-            self.max_score[center] = both_max_score
-
-    def update_maxscore(self, rep):
-        """
-        Re-calculate the 'max_score' value for a single given cluster.
-        :param rep: the cluster's representative's index.
-        """
-        clstr_sc = [(seq_ind, self.score[seq_ind]) for seq_ind in self.C_til[rep]]
-        self.max_score[rep] = sorted(clstr_sc, reverse=True, key=lambda x: x[1])[:NUM_HEIGHEST]
+                both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:NUM_HEIGHEST]
+                self.max_score[merged] = [tuple()]
+                self.max_score[center] = both_max_score
 
     def lsh_clustering(self):
         """
@@ -409,38 +394,31 @@ class LSHCluster:
         Improves speed in the cost of accuracy.
         :note: currently not in use.
         """
-        for itr in range(self.L):
+        for itr in range(20):
             time_start = time.time()
             sigs = list()
             # choose random k elements of the LSH signature
-            indexes = random.sample(range(self.m), self.k)
+            k = 3
+            indexes = random.sample(range(self.m), k)
             for idx in range(len(self.all_reads)):
                 # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(k))
                 sigs.append((idx, sig))
-            sigs.sort(key=lambda x: (x[1], -self.score[x[0]]))
+            if itr % 4 == 0:
+                sigs.sort(key=lambda x: (x[1], -self.score[x[0]]))
+            else:
+                sigs.sort(key=lambda x: x[1])
             ref = 0
             for a in range(1, len(sigs)):
                 if sigs[a-1][1] != sigs[a][1]:
                     ref = a
                 else:
                     sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[ref][0]])
-                    if sd >= 0.36 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
+                    if sd >= 0.35 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
                                                              LSHCluster.index(self.all_reads[sigs[ref][0]])) <= 3):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[ref][0]] += 1
                         self._add_pair(sigs[a][0], sigs[ref][0])
-            '''
-            sigs.sort(key=lambda x: x[1])
-            for a in range(len(sigs) - 1):
-                if sigs[a][1] == sigs[a + 1][1]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.36 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
-                                                             LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
-                        self.score[sigs[a][0]] += 1
-                        self.score[sigs[a + 1][0]] += 1
-                        self._add_pair(sigs[a][0], sigs[a + 1][0])
-            '''
             self.duration += time.time() - time_start
             print("-INFO: time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
@@ -458,12 +436,16 @@ class LSHCluster:
         r = -1
         bad_rounds = 0
         for itr in range(self.max_reduced_iters):
+            if itr == 500 or itr == 800:
+                time_measure = time.time()
+                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+                self.duration -= (time.time() - time_measure)
             time_start = time.time()
             sigs = list()
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             if singles_round_start == 0:
                 break
-            # reset data structures every 10 iterations
+            # reset data structures every 20 iterations
             if itr % 10 == 0:
                 r = (r + 1) % NUM_HEIGHEST
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
@@ -475,7 +457,7 @@ class LSHCluster:
                         focus.append(self.max_score[rep][r][0])
             random.shuffle(focus)
 
-            # choose random k elements of the LSH signature
+            # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
             indexes = random.sample(range(self.m), self.k)
             for idx in focus:
                 # represent the sig as a single integer
@@ -511,146 +493,74 @@ class LSHCluster:
         print("-INFO: time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
         return success_rate
 
-    def relabel(self, r=0):
-        """
-        Used AFTER we executed 'lsh_clustering'. The purpose is to handle single sequences (meaning, clusters of
-        size 1). We'll iterate over those sequences, and look for the cluster whose most highly ranked sequence is
-        similar to that single sequence.
-        :param r: 0 for the using the sequence with the highest score to represent a cluster. 1 for the second highest,
-            and so on. if the cluster is smaller than 'r', we won't use it.
-        :return: the precent of relabled singles out of the total number of singles we began with.
-        :note: currently not in use, as it becomes quite costly for large datasets
-        """
+    def reduced_clustering2(self):
+        tot = time.time()
+        initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+        singles_round_end = initial_singles
+        r = -1
+        bad_rounds = 0
+        for itr in range(self.max_reduced_iters):
+            if itr == 500 or itr == 800:
+                time_measure = time.time()
+                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+                self.duration -= (time.time() - time_measure)
+            time_start = time.time()
+            
+            sigs = list()
+            singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+            if singles_round_start == 0:
+                break
+            focus = [random.choice(clstr) for clstr in self.C_til.values() if len(clstr) > 0]
 
-        def _relabel_given_singles(tasks, results, r=0):
-            """
-            Preforms the relabeling process, by one of the worker threads.
-            :param tasks: queue with the singles left for scanning a cluster to match them to.
-            :param results: queue for storing the results (the pairs of a single and a cluster's representative)
-            :param r: we store the the sequences with the best score in a cluster in order, so r=0 represents the
-                best one, r=1 the one after it, and so on.
-            """
-            clstr_reps = [center for center, clstr in sorted(self.C_til.items(), key=lambda x: x[1], reverse=True) if
-                          len(clstr) > 1]
-            res = set()
-            while True:
-                next_single = tasks.get()
-                if next_single is None:
-                    if len(res) > 0:
-                        results.put(res)
-                    tasks.task_done()
-                    break
-                found = False
-                for rep in clstr_reps:
-                    # get the index of the sequence with the highest score (from the current cluster)
-                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
-                        best = self.max_score[rep][r][0]
-                        sd = LSHCluster.sorensen_dice(self.numsets[next_single], self.numsets[best])
-                        if sd >= 0.27 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[next_single]),
-                                                                  LSHCluster.index(self.all_reads[best])) <= 3):
-                            tasks.task_done()
-                            res.add((next_single, rep))
-                            if len(res) > RESULTS_CHUNK:
-                                results.put(res)
-                                res = set()
-                            found = True
-                            break
-                if not found:
-                    tasks.task_done()  # Nothing was chosen for this single
-            return
+            # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
+            indexes = random.sample(range(self.m), self.k)
+            for idx in focus:
+                # represent the sig as a single integer
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
+                sigs.append((idx, sig))
 
-        time_start = time.time()
-        singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
-        initial_singles = len(singles)
-        if initial_singles == 0:
-            return 0
+            sigs.sort(key=lambda x: x[1])
+            for a in range(len(sigs) - 1):
+                if sigs[a][1] == sigs[a + 1][1]:
+                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
+                    if sd >= 0.25 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
+                                                              LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
+                        p1 = self.rep_find(sigs[a][0])
+                        p2 = self.rep_find(sigs[a + 1][0])
+                        if p1 != p2:
+                            # update clusters:
+                            center, merged = min(p1, p2), max(p1, p2)
+                            self.C_til[center].extend(self.C_til[merged])
+                            self.C_til[merged] = []
+                            # update parents:
+                            self.parent[merged] = center
 
-        # scanning for pairs will be executed in parallel
-        tasks, results, processes = mp.JoinableQueue(), mp.Queue(maxsize=QSIZE), list()
-        for _ in range(self.jobs):
-            processes.append(mp.Process(target=_relabel_given_singles, args=(tasks, results, r,)))
-        [p.start() for p in processes]
-        for single in singles:
-            tasks.put(single)
-        for _ in range(self.jobs):
-            tasks.put(None)  # poison pill
-
-        liveprocs = list(processes)
-        while liveprocs:
-            try:
-                while True:
-                    pairs = results.get_nowait()
-                    for pair in pairs:
-                        self.score[pair[1]] += 1
-                        self.score[pair[0]] += 1
-                        self._add_pair(pair[1], pair[0])
-            except queue.Empty:
-                pass
-            if not results.empty():
-                continue
-            liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
-
-        # information for deciding whether to continue to additional iterations
-        final_singles = len([1 for clstr in self.C_til.values() if len(clstr) == 1])
-        success_rate = float(initial_singles - final_singles) / initial_singles
-        self.duration += time.time() - time_start
-        print("-INFO: Time for relabeling step {}: {}. Success rate: {}".format(r, time.time() - time_start, success_rate))
-        return success_rate
-
-    def common_substr_step(self, w=3, t=4, repeats=220):
-        """
-        Step of clustering the sequences using a sub string shared by several sequences. Will be done via getting a
-        random permutation of size 'w', then looking for it inside the input sequences. If exists, we will use a
-        subs string of size 't' starting with it. Otherwise, a prefix of size 't' will be used instead.
-        :param w: size for the permutation we will search for inside the sequences.
-        :param t: the size of common sub string.
-        :param repeats: number of iterations, as it's an iterative algorithm.
-        :return: the updated C_til
-        :note: currently not in use, as it doesn't provide any advantages in compare to the reduced LSH clustering step.
-        """
-
-        def cmn_substr(x, a, w, t):
-            ind = x.find(a)
-            if ind == -1:
-                ind = 0
-            return x[ind:min(len(x), ind + w + t)]
-
-        time_start = time.time()
-        relevant_centers = [center for center, clstr in self.C_til.items() if 1 <= len(clstr) <= 13]
-        if len(relevant_centers) == 0: return self.C_til
-        for _ in range(repeats):
-            a = ''.join(random.choice('ACGT') for _ in range(w))
-            singles = [random.choice(self.C_til[center]) for center in relevant_centers if len(self.C_til[center]) >= 1]
-            common_substr_hash = []
-            for idx in singles:
-                common_substr_hash.append((idx, cmn_substr(self.all_reads[idx], a, w, t)))
-            common_substr_hash.sort(key=lambda x: x[1])
-
-            for idx in range(len(common_substr_hash) - 1):
-                if common_substr_hash[idx] is None:
-                    continue
-                elif common_substr_hash[idx][1] == common_substr_hash[idx + 1][1]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[common_substr_hash[idx][0]],
-                                                  self.numsets[common_substr_hash[idx + 1][0]])
-                    if sd >= 0.18:
-                        self._add_pair(common_substr_hash[idx][0], common_substr_hash[idx + 1][0],
-                                       update_maxscore=True)
-        self.duration += time.time() - time_start
-        print("-INFO: Common sub-string step took: {}".format(time.time() - time_start))
-        return self.C_til
-
+            singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
+            print("-INFO: {} | {} s | r={} | first={} | end={} | diff={}".format(itr + 1,
+                  time.time() - time_start, r, singles_round_start, singles_round_end,
+                    singles_round_start - singles_round_end))
+            if singles_round_start - singles_round_end <= WORK_IN_BAD_ROUND:
+                bad_rounds += 1
+            else:
+                bad_rounds = 0
+            if bad_rounds >= ALLOWED_BAD_ROUNDS:
+                print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
+                break
+        self.duration += time.time() - tot
+        print("-INFO: time for a 'reduced clustering' stage: {}".format(time.time() - tot))
+        
     def run(self, accrcy=True):
         """
         To be used in order to preform the whole algorithm flow.
         :param accrcy: True for printing accuracy results. False otherwise.
         """
         lsh_begin = time.time()
-        self.lsh_clustering()
+        self.lsh_clustering_new_draft()     # check
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Reduced clustering step:")
-        self.reduced_clustering()
+        self.reduced_clustering2()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Total time (include init): {}".format(self.duration))
@@ -717,10 +627,11 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
     size = len(clstrs) + len(singles)
     print("Clusters > 1: {}, Singles: {}".format(len(clstrs), len(singles)))
     print("Accuracy:")
-    accrcy = {gamma: calc_acrcy(C_til, C_dict, C_reps, gamma, reads_err) / size
-              for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
-    [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
-    print("*************************************************************")
+    if size != 0:
+        accrcy = {gamma: calc_acrcy(C_til, C_dict, C_reps, gamma, reads_err) / size
+                for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
+        [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
+        print("*************************************************************")
 
 
 # **********************************
