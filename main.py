@@ -8,7 +8,6 @@ import random
 import multiprocessing as mp
 import queue
 
-
 # **********************************
 #   Globals & Auxiliary functions
 # **********************************
@@ -394,7 +393,7 @@ class LSHCluster:
         Improves speed in the cost of accuracy.
         :note: currently not in use.
         """
-        for itr in range(20):
+        for itr in range(14):
             time_start = time.time()
             sigs = list()
             # choose random k elements of the LSH signature
@@ -404,10 +403,7 @@ class LSHCluster:
                 # represent the sig as a single integer
                 sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(k))
                 sigs.append((idx, sig))
-            if itr % 4 == 0:
-                sigs.sort(key=lambda x: (x[1], -self.score[x[0]]))
-            else:
-                sigs.sort(key=lambda x: x[1])
+            sigs.sort(key=lambda x: x[1])
             ref = 0
             for a in range(1, len(sigs)):
                 if sigs[a-1][1] != sigs[a][1]:
@@ -431,110 +427,44 @@ class LSHCluster:
         :note: the implementation of this step is purely serial, as multiprocessing's overhead seemed too costly.
         """
         tot = time.time()
-        initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-        singles_round_end = initial_singles
         r = -1
         bad_rounds = 0
         for itr in range(self.max_reduced_iters):
-            if itr == 500 or itr == 800:
+            if itr == 300 or itr == 500 or itr == 800:
                 time_measure = time.time()
                 print_accrcy(self.C_til, C_dict, C_reps, reads_err)
                 self.duration -= (time.time() - time_measure)
+                print("-INFO: time for a 'reduced clustering' stage UNTIL NOW: {}.".format(time.time() - tot))
             time_start = time.time()
             sigs = list()
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             if singles_round_start == 0:
                 break
             # reset data structures every 20 iterations
-            if itr % 10 == 0:
+            k = 3
+            if itr % 8 == 0:
                 r = (r + 1) % NUM_HEIGHEST
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
-                if singles_round_start == 0:
-                    break
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
                     if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                         focus.append(self.max_score[rep][r][0])
-            random.shuffle(focus)
 
             # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
-            indexes = random.sample(range(self.m), self.k)
+            indexes = random.sample(range(self.m), k)
             for idx in focus:
                 # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(k))
                 sigs.append((idx, sig))
 
             sigs.sort(key=lambda x: x[1])
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
                     sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.25 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
-                                                              LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
+                    if sd >= 0.25 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]), LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
-            del sigs
-
-            singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-            working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1,
-                  time.time() - time_start, working_rate, r, singles_round_start, singles_round_end,
-                    singles_round_start - singles_round_end))
-            if singles_round_start - singles_round_end <= WORK_IN_BAD_ROUND:
-                bad_rounds += 1
-            else:
-                bad_rounds = 0
-            if bad_rounds >= ALLOWED_BAD_ROUNDS:
-                print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
-                break
-
-        success_rate = float(initial_singles - singles_round_end) / initial_singles if initial_singles != 0 else 0
-        self.duration += time.time() - tot
-        print("-INFO: time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot, success_rate))
-        return success_rate
-
-    def reduced_clustering2(self):
-        tot = time.time()
-        initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-        singles_round_end = initial_singles
-        r = -1
-        bad_rounds = 0
-        for itr in range(self.max_reduced_iters):
-            if itr == 500 or itr == 800:
-                time_measure = time.time()
-                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
-                self.duration -= (time.time() - time_measure)
-            time_start = time.time()
-            
-            sigs = list()
-            singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-            if singles_round_start == 0:
-                break
-            focus = [random.choice(clstr) for clstr in self.C_til.values() if len(clstr) > 0]
-
-            # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
-            indexes = random.sample(range(self.m), self.k)
-            for idx in focus:
-                # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
-                sigs.append((idx, sig))
-
-            sigs.sort(key=lambda x: x[1])
-            for a in range(len(sigs) - 1):
-                if sigs[a][1] == sigs[a + 1][1]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.25 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
-                                                              LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
-                        p1 = self.rep_find(sigs[a][0])
-                        p2 = self.rep_find(sigs[a + 1][0])
-                        if p1 != p2:
-                            # update clusters:
-                            center, merged = min(p1, p2), max(p1, p2)
-                            self.C_til[center].extend(self.C_til[merged])
-                            self.C_til[merged] = []
-                            # update parents:
-                            self.parent[merged] = center
-
             singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             print("-INFO: {} | {} s | r={} | first={} | end={} | diff={}".format(itr + 1,
                   time.time() - time_start, r, singles_round_start, singles_round_end,
@@ -547,8 +477,23 @@ class LSHCluster:
                 print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
                 break
         self.duration += time.time() - tot
-        print("-INFO: time for a 'reduced clustering' stage: {}".format(time.time() - tot))
-        
+        print("-INFO: time for a 'reduced clustering' stage: {}.".format(time.time() - tot))
+
+
+    def print_result(self):
+        path = '/home_nfs/adar.hadad/results/' + ''.join(random.choice('abcdef') for _ in range(7))
+        with open(path, 'w', newline='\n') as temp_f:
+            cnt = 0
+            for cluster in self.C_til.values():
+                orig_strand = "{}\n".format(cnt)
+                cnt += 1
+                temp_f.write(orig_strand)
+                temp_f.write('*****************************\n')
+                for cluster_element in cluster:
+                    temp_f.write(self.all_reads[cluster_element] + '\n')
+                temp_f.write('\n\n')
+        return path
+
     def run(self, accrcy=True):
         """
         To be used in order to preform the whole algorithm flow.
@@ -560,10 +505,12 @@ class LSHCluster:
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Reduced clustering step:")
-        self.reduced_clustering2()
+        self.reduced_clustering()
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("Total time (include init): {}".format(self.duration))
+        print("Will create an output file.\n\n")
+        path = self.print_result()
 
 
 # **********************************
@@ -696,7 +643,7 @@ if __name__ == '__main__':
             reads_err[i] = C_reps[i][0]
     else:
         reads_err = reads_cl
-    random.shuffle(reads_err)
+    random.shuffle(reads_err)   # important
 
     # test the clustering algorithm
     size = len([center for center, clstr in C_dict.items() if len(clstr) > 0])
