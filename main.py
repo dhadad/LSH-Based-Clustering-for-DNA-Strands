@@ -23,7 +23,6 @@ ALLOWED_BAD_ROUNDS = 7
 REDUCED_ITERS_FOR_LINE = 2.1 * 10 ** (-4)
 MIN_REDUCED_ITERS = 100
 SLEEP_BEFORE_TRY = 0.03
-MIN_SCORE_FOR_REDUCED = 8
 
 def edit_dis(s1, s2):
     """
@@ -451,7 +450,7 @@ class LSHCluster:
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
-                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0 and self.score[self.max_score[rep][r][0]] >= MIN_SCORE_FOR_REDUCED:
+                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
                         # print("score of {} is : {}".format(self.max_score[rep][r][0], self.score[self.max_score[rep][r][0]]))
                         focus.append(self.max_score[rep][r][0])
             # random.shuffle(focus)
