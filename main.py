@@ -20,9 +20,10 @@ QSIZE = 2000000
 RESULTS_CHUNK = 2500
 WORK_IN_BAD_ROUND = 4
 ALLOWED_BAD_ROUNDS = 7
-REDUCED_ITERS_FOR_LINE = 2.2 * 10 ** (-4)
+REDUCED_ITERS_FOR_LINE = 2.1 * 10 ** (-4)
 MIN_REDUCED_ITERS = 100
 SLEEP_BEFORE_TRY = 0.03
+MIN_SCORE_FOR_REDUCED = 8
 
 def edit_dis(s1, s2):
     """
@@ -450,9 +451,10 @@ class LSHCluster:
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
-                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
+                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0 and self.score[self.max_score[rep][r][0]] >= MIN_SCORE_FOR_REDUCED:
+                        # print("score of {} is : {}".format(self.max_score[rep][r][0], self.score[self.max_score[rep][r][0]]))
                         focus.append(self.max_score[rep][r][0])
-            random.shuffle(focus)
+            # random.shuffle(focus)
 
             # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
             indexes = random.sample(range(self.m), self.k)
@@ -644,5 +646,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSHCluster(reads_err, q=6, k=3, m=35, L=30)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=32, L=28)
     lsh.run(accrcy=oracle)
