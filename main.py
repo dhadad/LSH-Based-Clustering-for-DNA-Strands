@@ -451,9 +451,8 @@ class LSHCluster:
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
                     if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
-                        # print("score of {} is : {}".format(self.max_score[rep][r][0], self.score[self.max_score[rep][r][0]]))
                         focus.append(self.max_score[rep][r][0])
-            # random.shuffle(focus)
+            random.shuffle(focus)
 
             # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
             indexes = random.sample(range(self.m), self.k)
@@ -645,5 +644,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSHCluster(reads_err, q=6, k=3, m=32, L=28)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=38, L=28)
     lsh.run(accrcy=oracle)
