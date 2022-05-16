@@ -19,7 +19,7 @@ REF_PNTS = 12
 QSIZE = 2000000
 RESULTS_CHUNK = 2500
 WORK_IN_BAD_ROUND = 4
-ALLOWED_BAD_ROUNDS = 7
+ALLOWED_BAD_ROUNDS = 9
 REDUCED_ITERS_FOR_LINE = 2.1 * 10 ** (-4)
 MIN_REDUCED_ITERS = 100
 SLEEP_BEFORE_TRY = 0.03
@@ -432,22 +432,22 @@ class LSHCluster:
         singles_round_end = initial_singles
         r = -1
         bad_rounds = 0
-        base = [(self.top ** i) for i in range(self.k)]
         for itr in range(self.max_reduced_iters):
-            if itr == 1500 or itr == 1000 or itr == 800:
+            if itr == 1000 or itr == 800:
                 time_measure = time.time()
                 print_accrcy(self.C_til, C_dict, C_reps, reads_err)
                 self.duration -= (time.time() - time_measure)
-                print("-INFO: time for a 'reduced clustering' stage UNTIL NOW: {}.".format(time.time() - tot))
             time_start = time.time()
             sigs = list()
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             if singles_round_start == 0:
                 break
-            # reset data structures every 10 iterations
+            # reset data structures every 20 iterations
             if itr % 10 == 0:
                 r = (r + 1) % NUM_HEIGHEST
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+                if singles_round_start == 0:
+                    break
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
                     if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
@@ -458,7 +458,7 @@ class LSHCluster:
             indexes = random.sample(range(self.m), self.k)
             for idx in focus:
                 # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * base[i] for i in range(self.k))
+                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
                 sigs.append((idx, sig))
 
             sigs.sort(key=lambda x: x[1])
@@ -496,7 +496,7 @@ class LSHCluster:
         :param accrcy: True for printing accuracy results. False otherwise.
         """
         lsh_begin = time.time()
-        self.lsh_clustering_new_draft()     # check
+        self.lsh_clustering_new_draft()
         print("Time for basic LSH clustring step: {}".format(time.time() - lsh_begin))
         if accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
@@ -644,5 +644,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSHCluster(reads_err, q=6, k=3, m=38, L=28)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=38, L=32)
     lsh.run(accrcy=oracle)
