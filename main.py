@@ -406,16 +406,14 @@ class LSHCluster:
                 sigs.append((idx, sig))
             sigs.sort(key=lambda x: x[1])
             ref = 0
-            for a in range(1, len(sigs)):
-                if sigs[a-1][1] != sigs[a][1]:
-                    ref = a
-                else:
-                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[ref][0]])
+            for a in range(0, len(sigs) - 1):
+                if sigs[a][1] == sigs[a + 1][1]:
+                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
                     if sd >= 0.35 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
-                                                             LSHCluster.index(self.all_reads[sigs[ref][0]])) <= 3):
+                                                             LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
                         self.score[sigs[a][0]] += 1
-                        self.score[sigs[ref][0]] += 1
-                        self._add_pair(sigs[a][0], sigs[ref][0])
+                        self.score[sigs[a + 1][0]] += 1
+                        self._add_pair(sigs[a][0], sigs[a + 1][0])
             self.duration += time.time() - time_start
             print("-INFO: time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
 
