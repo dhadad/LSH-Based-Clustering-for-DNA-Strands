@@ -19,8 +19,9 @@ NUM_HEIGHEST = 5
 REF_PNTS = 12
 QSIZE = 2000000
 RESULTS_DELIEVERY = 2500
-REFRESH_FOCUS = 0.005
-ROUNDS_BEFORE_REFRESH = 8
+REFRESH_FOCUS = 0.005           # little work, consider replace the represtatives
+ROUNDS_BEFORE_REFRESH = 8       # rounds of little work, before force refresh
+REFRESH_FOCUS_SAME_REP = 0.03   # a lot of work, refresh could make the 'focus' array smaller
 ALLOWED_BAD_ROUNDS = 7
 SLEEP_BEFORE_TRY = 0.03
 
@@ -72,9 +73,6 @@ class LSHCluster:
         print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
         self.buckets = None
 
-        #self.strands_in_chunk = math.ceil(math.sqrt(len(self.all_reads)))
-        #print("-INFO: desired number of strands in a chunk: {}".format(self.strands_in_chunk))
-
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
         self.C_til = {idx: [idx] for idx in range(len(all_reads))}
 
@@ -96,11 +94,6 @@ class LSHCluster:
 
         self.chunks = [[idx] for idx in range(len(all_reads))]
         self.chunk_parent = [idx for idx in range(len(all_reads))]
-
-        #self.avg_chunk = 0
-        #self.chunks = dict()
-        #self.chunk_parent = dict()
-        #self.static_chunks()
 
     @staticmethod
     def index(seq):
@@ -433,99 +426,8 @@ class LSHCluster:
                         self.chunks[merged] = []
                         self.chunk_parent[merged] = center
             print("-INFO: (common sub-string) iteration {} took: {}".format(itr, time.time() - time_itr))
-
-        """
-        # handle small chunks
-        time_itr = time.time()
-        self.avg_chunk = mean([len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) > 1])
-        small_chunks = [idx for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1 and len(self.chunks[idx]) < SMALL_CHUNK * self.strands_in_chunk]
-        random.shuffle(small_chunks)
-        print("-INFO: (common sub-string) average chunk size: {}, number of chunks smaller than {} is {} (before handeling small chunks)".format(self.avg_chunk, SMALL_CHUNK * self.strands_in_chunk, len(small_chunks)))
-        
-        ref = small_chunks[0]
-        # p1 = self.rep_find(ref, chunks=True)
-        cntr = len(self.chunks[ref])
-        for small_chunk_rep in small_chunks:
-            # print("cntr {}. len ref: {}, len cu rep: {}".format(cntr, len(self.chunks[ref]), len(self.chunks[small_chunk_rep])))
-            if cntr > SMALL_CHUNK * self.strands_in_chunk:
-                p1 = self.rep_find(small_chunk_rep, chunks=True)
-                cntr = len(self.chunks[p1])
-                ref = small_chunk_rep
-            else:
-                p1 = self.rep_find(small_chunk_rep, chunks=True)
-                p2 = self.rep_find(ref, chunks=True)
-                if p1 != p2:
-                    cntr += len(self.chunks[p1])
-                    center, merged = min(p1, p2), max(p1, p2)
-                    self.chunks[center].extend(self.chunks[merged])
-                    self.chunks[merged] = []
-                    self.chunk_parent[merged] = center
-                    ref = center
-        self.avg_chunk = mean([len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) > 1])
-        small_chunks = [idx for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1 and len(self.chunks[idx]) < SMALL_CHUNK * self.strands_in_chunk]
-        print("-INFO: (common sub-string) average chunk size: {}, number of chunks smaller than {} is {} (after handeling small chunks)".format(self.avg_chunk, SMALL_CHUNK * self.strands_in_chunk, len(small_chunks)))
-        print("-INFO: (common sub-string) handeling small chunks took: {}".format(time.time() - time_itr))
-
-        # split big chunks
-        time_itr = time.time()
-        big_chunks = [idx for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= BIG_CHUNK * self.strands_in_chunk]
-        print("-INFO: (common sub-string) number of chunks bigger than {} is {}".format(BIG_CHUNK * self.strands_in_chunk, len(big_chunks)))
-        base = [(self.top ** i) for i in range(self.k)]
-        sigs = list()
-        for chunk_rep in big_chunks:
-            chunk = self.chunks[chunk_rep]
-            self.chunks[chunk_rep] = []
-            indexes = random.sample(range(self.m), self.k)
-            for idx in chunk:
-                # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * base[i] for i in range(self.k))
-                sigs.append((idx, sig))
-            sigs.sort(key=lambda x: x[1])
-            ref = sigs[0][0]
-            self.chunk_parent[ref] = ref
-            cur_chunk = [ref]
-            for a in range(1, len(sigs)):
-                if len(cur_chunk) > REASONABLE_CHUNK * self.strands_in_chunk:
-                    # split here
-                    self.chunks[ref] = cur_chunk
-                    ref = sigs[a][0]
-                    self.chunk_parent[ref] = ref
-                    cur_chunk = [ref]
-                else:
-                    cur_chunk.append(sigs[a][0])
-                    self.chunk_parent[sigs[a][0]] = ref
-            if len(cur_chunk) > 0:
-                self.chunks[ref] = cur_chunk
-
-        big_chunks = [idx for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= BIG_CHUNK * self.strands_in_chunk]
-        print("-INFO: (common sub-string) number of chunks bigger than {} is {} (after handeling big chunks)".format(BIG_CHUNK * self.strands_in_chunk, len(big_chunks)))
-        print("-INFO: (common sub-string) handeling big chunks took: {}".format(time.time() - time_itr))
-        """
         self.duration += time.time() - time_start
         print("-INFO: End Stage: Common sub-string step took: {}".format(time.time() - time_start))
-
-    def static_chunks(self):
-        time_start = time.time()
-        idxs = [num for num in range((len(self.all_reads)))]
-        random.shuffle(idxs)
-        num_clstrs = float(len(self.all_reads)) / self.avg_clstr
-        chunk_size = max(100 * int(len(self.all_reads) / num_clstrs), 1)
-        print("avg clstr: {} num clstrs: {} chunk_size: {}".format(self.avg_clstr, num_clstrs, chunk_size))
-        cntr = 0
-        for num in range(1, len(self.all_reads)):
-            if cntr < chunk_size:
-                p1 = self.rep_find(idxs[num], chunks=True)
-                p2 = self.rep_find(idxs[num-1], chunks=True)
-                if p1 != p2:
-                    center, merged = min(p1, p2), max(p1, p2)
-                    self.chunks[center].extend(self.chunks[merged])
-                    self.chunks[merged] = []
-                    self.chunk_parent[merged] = center
-                cntr += 1
-            else:
-                cntr = 0
-        self.duration += time.time() - time_start
-        print("Common sub-string step took: {}".format(time.time() - time_start))
 
     def check_all_clusters_spread(self):
         def cluster_spread_accros_chunks(rep):
@@ -719,11 +621,15 @@ class LSHCluster:
             if singles_round_start == 0:
                 break
             work_in_bad_round = math.ceil(math.log(singles_round_end, 4))
+
             # reset data structures
             cnt_before_refresh = cnt_before_refresh + 1 if working_rate <= REFRESH_FOCUS else 0
-            if itr % 20 == 0 or cnt_before_refresh >= ROUNDS_BEFORE_REFRESH:
+            refresh = itr % 5 == 0 and working_rate >= REFRESH_FOCUS_SAME_REP
+            change_r = itr % 20 == 0 or cnt_before_refresh >= ROUNDS_BEFORE_REFRESH
+            if change_r or refresh:
                 print("-INFO: refreshing 'focus' array")
-                r = (r + 1) % NUM_HEIGHEST
+                if change_r:
+                    r = (r + 1) % NUM_HEIGHEST
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
@@ -770,10 +676,12 @@ class LSHCluster:
         """
         # lsh_begin = time.time()
         self.chunk_paritioning()
-        debug_time = time.time()
-        self.check_all_clusters_spread()
-        self.check_all_chunks_goodness()
-        self.duration -= (time.time() - debug_time)
+        
+        #debug_time = time.time()
+        # self.check_all_clusters_spread()
+        # self.check_all_chunks_goodness()
+        #self.duration -= (time.time() - debug_time)
+        
         lsh_cls_time = time.time()
         self.avg_chunk = mean([len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1])
         reasonable_chunk = math.ceil(math.sqrt(len(self.all_reads)))
@@ -974,5 +882,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSHCluster(reads_err, q=6, k=3, m=38, L=16)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=16)
     lsh.run(accrcy=oracle)
