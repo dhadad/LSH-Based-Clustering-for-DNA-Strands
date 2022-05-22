@@ -19,18 +19,10 @@ NUM_HEIGHEST = 5
 REF_PNTS = 12
 QSIZE = 2000000
 RESULTS_DELIEVERY = 2500
-REFRESH_FOCUS = 0.003           # 0.1%
-ROUNDS_BEFORE_REFRESH = 3
-ALLOWED_BAD_ROUNDS = 8
-# REDUCED_ITERS_FOR_LINE = 2 * 10 ** (-4)
-# MIN_REDUCED_ITERS = 100
+REFRESH_FOCUS = 0.005
+ROUNDS_BEFORE_REFRESH = 8
+ALLOWED_BAD_ROUNDS = 7
 SLEEP_BEFORE_TRY = 0.03
-#MIN_CHUNK_SIZE = 1000
-#SMALL_CHUNK = 0.1
-#BIG_CHUNK = 10
-#REASONABLE_CHUNK = 5
-#DESIRED_CHUNK_FRACTION = 0.0002
-#MIN_CHUNKS_AMOUNT = 10
 
 def edit_dis(s1, s2):
     """
@@ -645,7 +637,8 @@ class LSHCluster:
         bad_rounds = 0
         working_rate = 0
         # iters_num = max(MIN_REDUCED_ITERS, int(2 * REDUCED_ITERS_FOR_LINE * len(chunk)))
-        iters_num = math.ceil(math.sqrt(len(chunk)))
+        # iters_num = math.ceil(math.sqrt(len(chunk)))
+        iters_num = math.ceil(len(chunk) ** (1/2.1))
         print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
             time_start = time.time()
@@ -653,7 +646,7 @@ class LSHCluster:
             singles_round_start = sum([1 for item in chunk if len(self.C_til[item]) == 1])
             if singles_round_start == 0:
                 break
-            work_in_bad_round = math.ceil(math.log(singles_round_end, 10))
+            work_in_bad_round = math.ceil(math.log(singles_round_end, 4))
             # reset data structures every 3 iterations
             if itr % 3 == 0:
                 r = (r + 1) % NUM_HEIGHEST
@@ -725,10 +718,10 @@ class LSHCluster:
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             if singles_round_start == 0:
                 break
-            work_in_bad_round = math.ceil(math.log(singles_round_end, 10))
+            work_in_bad_round = math.ceil(math.log(singles_round_end, 4))
             # reset data structures
             cnt_before_refresh = cnt_before_refresh + 1 if working_rate <= REFRESH_FOCUS else 0
-            if itr == 0 or cnt_before_refresh >= ROUNDS_BEFORE_REFRESH:
+            if itr % 20 == 0 or cnt_before_refresh >= ROUNDS_BEFORE_REFRESH:
                 print("-INFO: refreshing 'focus' array")
                 r = (r + 1) % NUM_HEIGHEST
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
@@ -761,7 +754,7 @@ class LSHCluster:
             print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1,
                   time.time() - time_start, working_rate, r, singles_round_start, singles_round_end, singles_round_start - singles_round_end))
             bad_rounds = bad_rounds + 1 if singles_round_start - singles_round_end <= work_in_bad_round else 0
-            if bad_rounds >= 2 * ALLOWED_BAD_ROUNDS:
+            if bad_rounds >= ALLOWED_BAD_ROUNDS:
                 print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
                 break
 
@@ -790,9 +783,9 @@ class LSHCluster:
             if len(self.chunks[chunk_rep]) > self.avg_chunk:
                 time_itr = time.time()
                 self.lsh_clustering_new_draft_chunk_dedicated(chunk_rep)
-                print("-INFO: chunk with rep {} is of size: {}. for reduced clustering step size {} is needed".format(chunk_rep, len(self.chunks[chunk_rep]), reasonable_chunk))
-                if len(self.chunks[chunk_rep]) > reasonable_chunk:
-                    self.reduced_clustering_chunk_dedicated(chunk_rep)
+                #print("-INFO: chunk with rep {} is of size: {}. for reduced clustering step size {} is needed".format(chunk_rep, len(self.chunks[chunk_rep]), reasonable_chunk))
+                #if len(self.chunks[chunk_rep]) > reasonable_chunk:
+                #    self.reduced_clustering_chunk_dedicated(chunk_rep)
                 print("-INFO: time for chunk with rep {}: {}".format(chunk_rep, time.time() - time_itr))
                 print("++++++++++++++++++++++++++++++++++++++++++++++++++")
         print("-INFO: time for work done in chunks: {}".format(time.time() - lsh_cls_time))
