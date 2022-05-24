@@ -24,6 +24,7 @@ ROUNDS_BEFORE_REFRESH = 8       # rounds of little work, before force refresh
 REFRESH_FOCUS_SAME_REP = 0.03   # a lot of work, refresh could make the 'focus' array smaller
 ALLOWED_BAD_ROUNDS = 7
 SLEEP_BEFORE_TRY = 0.03
+STOP_CHUNKING = 0.001
 
 def edit_dis(s1, s2):
     """
@@ -397,18 +398,22 @@ class LSHCluster:
             return x[ind:min(len(x), ind + w + t)]
 
         time_start = time.time()
-        repeats = math.ceil(1 / (0.25 ** self.k))
-        w = math.ceil(math.log(len(self.all_reads[0]),4))   # 3             consider to make smaller !!!!!
+        repeats = 64
+        cnt_merges = 0
+        w = math.ceil(math.log(len(self.all_reads[0]),4))
         t = max(math.ceil(math.log(len(self.all_reads),4)), w)
         print("-INFO: (common sub-string) params: w = {}, t = {}, repeats = {}".format(w, t, repeats))
         for itr in range(repeats):
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING:
+                break
+            cnt_merges = 0
             time_itr = time.time()
             a = ''.join(random.choice('ACGT') for _ in range(w))
             common_substr_hash = []
             for chunk in self.chunks:       # take 5 representatives from each chunk
                 if len(chunk) == 0:
                     continue
-                elif len(chunk) <= 5:
+                elif len(chunk) <= 10:
                     for idx in chunk:
                         common_substr_hash.append((idx, cmn_substr(self.all_reads[idx], a, w, t)))
                 else:
@@ -421,11 +426,12 @@ class LSHCluster:
                     p1 = self.rep_find(common_substr_hash[idx][0], chunks=True)
                     p2 = self.rep_find(common_substr_hash[idx + 1][0], chunks=True)
                     if p1 != p2:
+                        cnt_merges += 1
                         center, merged = min(p1, p2), max(p1, p2)
                         self.chunks[center].extend(self.chunks[merged])
                         self.chunks[merged] = []
                         self.chunk_parent[merged] = center
-            print("-INFO: (common sub-string) iteration {} took: {}".format(itr, time.time() - time_itr))
+            print("-INFO: (common sub-string) iteration {} took: {} for {} merges - {}".format(itr, time.time() - time_itr, cnt_merges, float(cnt_merges) / len(self.all_reads)))
         self.duration += time.time() - time_start
         print("-INFO: End Stage: Common sub-string step took: {}".format(time.time() - time_start))
 
@@ -677,18 +683,21 @@ class LSHCluster:
         # lsh_begin = time.time()
         self.chunk_paritioning()
         
-        #debug_time = time.time()
-        # self.check_all_clusters_spread()
-        # self.check_all_chunks_goodness()
-        #self.duration -= (time.time() - debug_time)
+        debug_time = time.time()
+        self.check_all_clusters_spread()
+        self.check_all_chunks_goodness()
+        self.duration -= (time.time() - debug_time)
         
         lsh_cls_time = time.time()
         self.avg_chunk = mean([len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1])
-        reasonable_chunk = math.ceil(math.sqrt(len(self.all_reads)))
-        print("-INFO: average chunk size (threshold for basic clustring step): {}. sqrt of the input size (threshold for the reduced clustering step): {}".format(self.avg_chunk, reasonable_chunk))
-        print("-INFO: chunks to be analyzed with 'reduced clustering step': {}".format(sum([1 for rep in range(len(self.chunks)) if len(self.chunks[rep]) > reasonable_chunk])))
+        #reasonable_chunk = math.ceil(math.sqrt(len(self.all_reads)))
+        print("-INFO: average chunk size (threshold for basic clustring step): {}".format(self.avg_chunk))
+        #print("-INFO: average chunk size (threshold for basic clustring step): {}. sqrt of the input size (threshold for the reduced clustering step): {}".format(self.avg_chunk, reasonable_chunk))
+        #print("-INFO: chunks to be analyzed with 'reduced clustering step': {}".format(sum([1 for rep in range(len(self.chunks)) if len(self.chunks[rep]) > reasonable_chunk])))
+        print("-INFO: chunks to be analyzed: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(self.chunks[chunk_rep]) >= self.avg_chunk))))
+        print("-INFO: chunks to be ignored: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(self.chunks[chunk_rep]) > 0 and len(self.chunks[chunk_rep]) < self.avg_chunk))))
         for chunk_rep in range(len(self.chunks)):
-            if len(self.chunks[chunk_rep]) > self.avg_chunk:
+            if len(self.chunks[chunk_rep]) >= self.avg_chunk:
                 time_itr = time.time()
                 self.lsh_clustering_new_draft_chunk_dedicated(chunk_rep)
                 #print("-INFO: chunk with rep {} is of size: {}. for reduced clustering step size {} is needed".format(chunk_rep, len(self.chunks[chunk_rep]), reasonable_chunk))
@@ -757,7 +766,13 @@ def comp_clstrs2(alg_clstr, org_clstr, gamma, reads_err):
     true_positives = 0
     min_true = gamma * len(org_clstr)
     false_positives = 0
-    max_false = (1/gamma - 1) * len(org_clstr)
+    # max_false = (1/gamma - 1) * len(org_clstr)
+    if len(org_clstr) >= 20:
+        max_false = 2
+    elif len(org_clstr) >= 10:
+        max_false = 1
+    else:
+        max_false = 0
     # print("max_false = {} * {} = {}".format(((1/gamma - 1)),len(org_clstr), max_false))
     for i in range(0, len(alg_clstr)):
         flg_exist = 0
