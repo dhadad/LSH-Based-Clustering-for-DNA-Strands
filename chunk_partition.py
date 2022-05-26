@@ -22,9 +22,11 @@ RESULTS_DELIEVERY = 2500
 REFRESH_FOCUS = 0.005           # little work, consider replace the represtatives
 ROUNDS_BEFORE_REFRESH = 8       # rounds of little work, before force refresh
 REFRESH_FOCUS_SAME_REP = 0.03   # a lot of work, refresh could make the 'focus' array smaller
-ALLOWED_BAD_ROUNDS = 7
+ALLOWED_BAD_ROUNDS = 4
 SLEEP_BEFORE_TRY = 0.03
 STOP_CHUNKING = 0.001
+REPS_FOR_CHUNK = 3
+RESONABLE_CHUNK = 0.5
 
 def edit_dis(s1, s2):
     """
@@ -398,28 +400,43 @@ class LSHCluster:
             return x[ind:min(len(x), ind + w + t)]
 
         time_start = time.time()
-        repeats = 64
+        repeats = 64        # upper bound
         cnt_merges = 0
-        w = math.ceil(math.log(len(self.all_reads[0]),4))
-        t = max(math.ceil(math.log(len(self.all_reads),4)), w)
+        # params when multi-sig
+        w = max(math.ceil(math.log(len(self.all_reads[0]),4)) - 1, 1)
+        t = max(math.ceil(math.log(len(self.all_reads),4)) - 1, w)
         print("-INFO: (common sub-string) params: w = {}, t = {}, repeats = {}".format(w, t, repeats))
+        
+        multi_sigs = 2
         for itr in range(repeats):
-            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING:
-                break
-            cnt_merges = 0
             time_itr = time.time()
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING:
+                if multi_sigs == 2:
+                    multi_sigs = 1
+                    # take longer substrings if we are using only one sig
+                    w = math.ceil(math.log(len(self.all_reads[0]),4))
+                    t = max(math.ceil(math.log(len(self.all_reads),4)), w)
+                    print("-INFO: (common sub-string) params: w = {}, t = {}, repeats = {}".format(w, t, repeats))
+                else:
+                    break
+            
+            sigs = [''.join(random.choice('ACGT') for _ in range(w)) for _ in range(multi_sigs)]
+            cnt_merges = 0
             a = ''.join(random.choice('ACGT') for _ in range(w))
             common_substr_hash = []
-            for chunk in self.chunks:       # take 5 representatives from each chunk
+            for chunk in self.chunks:
                 if len(chunk) == 0:
                     continue
-                elif len(chunk) <= 10:
+                elif len(chunk) <= REPS_FOR_CHUNK:
                     for idx in chunk:
-                        common_substr_hash.append((idx, cmn_substr(self.all_reads[idx], a, w, t)))
+                        full_sig = sorted(cmn_substr(self.all_reads[idx], a, w, t) for a in sigs)
+                        common_substr_hash.append((idx, full_sig))
                 else:
-                    idxs = random.choices(chunk, k = 5)
+                    idxs = random.choices(chunk, k = REPS_FOR_CHUNK)
                     for idx in idxs:
-                        common_substr_hash.append((idx, cmn_substr(self.all_reads[idx], a, w, t)))
+                        full_sig = sorted(cmn_substr(self.all_reads[idx], a, w, t) for a in sigs)
+                        common_substr_hash.append((idx, full_sig))
+
             common_substr_hash.sort(key=lambda x: x[1])
             for idx in range(0, len(common_substr_hash) - 1, 1):
                 if common_substr_hash[idx][1] == common_substr_hash[idx + 1][1]:
@@ -431,7 +448,7 @@ class LSHCluster:
                         self.chunks[center].extend(self.chunks[merged])
                         self.chunks[merged] = []
                         self.chunk_parent[merged] = center
-            print("-INFO: (common sub-string) iteration {} took: {} for {} merges - {}".format(itr, time.time() - time_itr, cnt_merges, float(cnt_merges) / len(self.all_reads)))
+            print("-INFO: (common sub-string) iteration {} took: {} for {} merges - {} with {} sigs".format(itr, time.time() - time_itr, cnt_merges, float(cnt_merges) / len(self.all_reads), multi_sigs))
         self.duration += time.time() - time_start
         print("-INFO: End Stage: Common sub-string step took: {}".format(time.time() - time_start))
 
@@ -617,7 +634,7 @@ class LSHCluster:
         iters_num = math.ceil(len(self.all_reads) ** (1/2.1))
         print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
-            if itr == 1000 or itr == 800:
+            if itr == 1000 or itr == 800 or itr == 600:
                 time_measure = time.time()
                 print_accrcy(self.C_til, C_dict, C_reps, reads_err)
                 self.duration -= (time.time() - time_measure)
@@ -694,10 +711,10 @@ class LSHCluster:
         print("-INFO: average chunk size (threshold for basic clustring step): {}".format(self.avg_chunk))
         #print("-INFO: average chunk size (threshold for basic clustring step): {}. sqrt of the input size (threshold for the reduced clustering step): {}".format(self.avg_chunk, reasonable_chunk))
         #print("-INFO: chunks to be analyzed with 'reduced clustering step': {}".format(sum([1 for rep in range(len(self.chunks)) if len(self.chunks[rep]) > reasonable_chunk])))
-        print("-INFO: chunks to be analyzed: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(self.chunks[chunk_rep]) >= self.avg_chunk))))
-        print("-INFO: chunks to be ignored: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(self.chunks[chunk_rep]) > 0 and len(self.chunks[chunk_rep]) < self.avg_chunk))))
+        print("-INFO: chunks to be analyzed: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(self.chunks[chunk_rep]) >= RESONABLE_CHUNK * self.avg_chunk))))
+        print("-INFO: chunks to be ignored: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(self.chunks[chunk_rep]) > 0 and len(self.chunks[chunk_rep]) < RESONABLE_CHUNK * self.avg_chunk))))
         for chunk_rep in range(len(self.chunks)):
-            if len(self.chunks[chunk_rep]) >= self.avg_chunk:
+            if len(self.chunks[chunk_rep]) >= RESONABLE_CHUNK * self.avg_chunk:
                 time_itr = time.time()
                 self.lsh_clustering_new_draft_chunk_dedicated(chunk_rep)
                 #print("-INFO: chunk with rep {} is of size: {}. for reduced clustering step size {} is needed".format(chunk_rep, len(self.chunks[chunk_rep]), reasonable_chunk))
@@ -734,77 +751,59 @@ def rep_in_C(read, C_reps):
             upper = mid - 1
     return -1
 
+class Accrcy:
+    def __init__(self, new_metric=False):
+        self.new_metric = new_metric
+        self.cnt_notsufficientlybig_mistake = 0
+        self.cnt_falsepos_mistake = 0
+        self.cnt_toobig = 0
 
-def find_size_in_mine(str, clustering, reads_err):
-    for i in clustering.keys():
-        if reads_err[i] == str:
-            return len(clustering[i])
-        for j in clustering[i]:
-            if reads_err[j] == str:
-                return len(clustering[i])
-    return 0
+    def calc(self, clustering, C_dict, C_reps, gamma, reads_err):
+        acrcy = 0
+        self.cnt_falsepos_mistake = 0
+        self.cnt_notsufficientlybig_mistake = 0
+        for i in clustering.keys():
+            if len(clustering[i]) >= 1:
+                acrcy += self.comp_clstrs(clustering[i],
+                                    C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
+        print("-INFO: ACCRCY g={}: {} bad clusters due to false positives. {} due to not being sufficiently big enough. {} because they were too big"
+                .format(gamma, self.cnt_falsepos_mistake, self.cnt_notsufficientlybig_mistake, self.cnt_toobig))
+        return acrcy
 
-
-def comp_clstrs(alg_clstr, org_clstr, gamma, reads_err):
-    num_exist = 0
-    if len(alg_clstr) > len(org_clstr):
-        return 0
-    for i in range(0, len(alg_clstr)):
-        flg_exist = 0
-        for j in range(0, len(org_clstr)):
-            if reads_err[alg_clstr[i]] == org_clstr[j]:
-                flg_exist = 1
-                num_exist += 1
-                break
-        if flg_exist == 0:
+    def comp_clstrs(self, alg_clstr, org_clstr, gamma, reads_err):
+        num_exist = 0
+        true_positives = 0
+        min_true = gamma * len(org_clstr)
+        if len(alg_clstr) > len(org_clstr):
+            self.cnt_toobig += 1
             return 0
-    if num_exist < gamma * len(org_clstr):
-        return 0
-    return 1
-
-def comp_clstrs2(alg_clstr, org_clstr, gamma, reads_err):
-    true_positives = 0
-    min_true = gamma * len(org_clstr)
-    false_positives = 0
-    # max_false = (1/gamma - 1) * len(org_clstr)
-    if len(org_clstr) >= 20:
-        max_false = 2
-    elif len(org_clstr) >= 10:
-        max_false = 1
-    else:
-        max_false = 0
-    # print("max_false = {} * {} = {}".format(((1/gamma - 1)),len(org_clstr), max_false))
-    for i in range(0, len(alg_clstr)):
-        flg_exist = 0
-        for j in range(0, len(org_clstr)):
-            if reads_err[alg_clstr[i]] == org_clstr[j]:
-                flg_exist = 1
-                true_positives += 1
-                break
-        if flg_exist == 0:
-            false_positives += 1
-            if false_positives > max_false: # allow limited number of false positives
-                return 0
-    if true_positives < min_true:
-        return 0
-    return 1
-
-def calc_acrcy(clustering, C_dict, C_reps, gamma, reads_err):
-    acrcy = 0
-    for i in clustering.keys():
-        if len(clustering[i]) >= 1:
-            acrcy += comp_clstrs(clustering[i],
-                                 C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
-    return acrcy
-
-def calc_acrcy2(clustering, C_dict, C_reps, gamma, reads_err):
-    acrcy = 0
-    for i in clustering.keys():
-        if len(clustering[i]) >= 1:
-            acrcy += comp_clstrs2(clustering[i],
-                                 C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
-    return acrcy
-
+        if self.new_metric:
+            if len(org_clstr) >= 30:
+                max_false = 3
+            elif 30 >= len(org_clstr) >= 20:
+                max_false = 2
+            elif len(org_clstr) >= 10:
+                max_false = 1
+            else:
+                max_false = 0
+        else:
+            max_false = 0
+        for i in range(0, len(alg_clstr)):
+            flg_exist = 0
+            for j in range(0, len(org_clstr)):
+                if reads_err[alg_clstr[i]] == org_clstr[j]:
+                    flg_exist = 1
+                    true_positives += 1
+                    break
+            if flg_exist == 0:
+                false_positives += 1
+                if false_positives > max_false: # allow limited number of false positives
+                    self.cnt_falsepos_mistake += 1
+                    return 0
+        if true_positives < min_true:
+            self.cnt_notsufficientlybig_mistake += 1
+            return 0
+        return 1
 
 def print_accrcy(C_til, C_dict, C_reps, reads_err):
     clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
@@ -812,14 +811,16 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
     size = len(clstrs) + len(singles)
     print("Clusters > 1: {}, Singles: {}".format(len(clstrs), len(singles)))
     print("Accuracy1 :")
+    ac = Accrcy(False)
     if size != 0:
-        accrcy = {gamma: calc_acrcy(C_til, C_dict, C_reps, gamma, reads_err) / size
+        accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
                 for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
         [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
         print("*************************************************************")
     print("Accuracy2 :")
+    ac = Accrcy(True)
     if size != 0:
-        accrcy = {gamma: calc_acrcy2(C_til, C_dict, C_reps, gamma, reads_err) / size
+        accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
                 for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
         [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
         print("*************************************************************")
@@ -897,5 +898,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=16)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=30, L=16)
     lsh.run(accrcy=oracle)
