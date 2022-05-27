@@ -9,6 +9,7 @@ import multiprocessing as mp
 from statistics import mean
 import queue
 import math
+import traceback
 
 # **********************************
 #   Globals & Auxiliary functions
@@ -22,7 +23,7 @@ RESULTS_DELIEVERY = 2500
 REFRESH_FOCUS = 0.005           # little work, consider replace the represtatives
 ROUNDS_BEFORE_REFRESH = 8       # rounds of little work, before force refresh
 REFRESH_FOCUS_SAME_REP = 0.03   # a lot of work, refresh could make the 'focus' array smaller
-ALLOWED_BAD_ROUNDS = 4
+ALLOWED_BAD_ROUNDS = 5
 SLEEP_BEFORE_TRY = 0.03
 STOP_CHUNKING = 0.001
 REPS_FOR_CHUNK = 3
@@ -752,32 +753,32 @@ def rep_in_C(read, C_reps):
     return -1
 
 class Accrcy:
-    def __init__(self, new_metric=False):
-        self.new_metric = new_metric
+    def __init__(self, metric='old'):
+        self.metric = metric
         self.cnt_notsufficientlybig_mistake = 0
         self.cnt_falsepos_mistake = 0
+        self.cnt_falsepos = 0
         self.cnt_toobig = 0
 
     def calc(self, clustering, C_dict, C_reps, gamma, reads_err):
         acrcy = 0
+        self.cnt_toobig = 0
+        self.cnt_falsepos = 0
         self.cnt_falsepos_mistake = 0
         self.cnt_notsufficientlybig_mistake = 0
         for i in clustering.keys():
             if len(clustering[i]) >= 1:
                 acrcy += self.comp_clstrs(clustering[i],
                                     C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
-        print("-INFO: ACCRCY g={}: {} bad clusters due to false positives. {} due to not being sufficiently big enough. {} because they were too big"
-                .format(gamma, self.cnt_falsepos_mistake, self.cnt_notsufficientlybig_mistake, self.cnt_toobig))
+        print("-INFO: ACCRCY g={}: {} bad clusters due to false positives (there're {} false poisitives). {} due to not being sufficiently big enough. {} because they were too big"
+                .format(gamma, self.cnt_falsepos_mistake, self.cnt_falsepos, self.cnt_notsufficientlybig_mistake, self.cnt_toobig))
         return acrcy
 
     def comp_clstrs(self, alg_clstr, org_clstr, gamma, reads_err):
         num_exist = 0
         true_positives = 0
         min_true = gamma * len(org_clstr)
-        if len(alg_clstr) > len(org_clstr):
-            self.cnt_toobig += 1
-            return 0
-        if self.new_metric:
+        if self.metric.lower() == 'new':
             if len(org_clstr) >= 30:
                 max_false = 3
             elif 30 >= len(org_clstr) >= 20:
@@ -786,8 +787,18 @@ class Accrcy:
                 max_false = 1
             else:
                 max_false = 0
+        elif self.metric.lower() == 'gamma':
+            max_false = math.ceil((float(1) / gamma - 1) * len(org_clstr))
         else:
             max_false = 0
+        if self.metric.lower()== 'old':
+            if len(alg_clstr) > len(org_clstr):
+                self.cnt_toobig += 1
+                return 0
+        else:   # gamma, new
+            if max_false + len(org_clstr) < len(alg_clstr):
+                self.cnt_toobig += 1
+                return 0
         for i in range(0, len(alg_clstr)):
             flg_exist = 0
             for j in range(0, len(org_clstr)):
@@ -796,8 +807,8 @@ class Accrcy:
                     true_positives += 1
                     break
             if flg_exist == 0:
-                false_positives += 1
-                if false_positives > max_false: # allow limited number of false positives
+                self.cnt_falsepos += 1
+                if self.cnt_falsepos > max_false: # allow limited number of false positives
                     self.cnt_falsepos_mistake += 1
                     return 0
         if true_positives < min_true:
@@ -810,20 +821,34 @@ def print_accrcy(C_til, C_dict, C_reps, reads_err):
     singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
     size = len(clstrs) + len(singles)
     print("Clusters > 1: {}, Singles: {}".format(len(clstrs), len(singles)))
-    print("Accuracy1 :")
-    ac = Accrcy(False)
-    if size != 0:
+    if size == 0: return
+    print("Accuracy1 (old):")
+    ac = Accrcy('old')
+    try:
         accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
                 for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
         [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
-        print("*************************************************************")
-    print("Accuracy2 :")
-    ac = Accrcy(True)
-    if size != 0:
+    except Exception:
+        print(traceback.format_exc())
+    print("*************************************************************")
+    print("Accuracy2 (1/gamma-1):")
+    ac = Accrcy('gamma')
+    try:
         accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
                 for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
         [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
-        print("*************************************************************")
+    except Exception:
+        print(traceback.format_exc())
+    print("*************************************************************")
+    print("Accuracy3 (absolute):")
+    ac = Accrcy('new')
+    try:
+        accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
+                for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
+        [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
+    except Exception:
+        print(traceback.format_exc())
+    print("*************************************************************")
 
 
 # **********************************
@@ -898,5 +923,6 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSHCluster(reads_err, q=6, k=3, m=30, L=16)
+    lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=32)
     lsh.run(accrcy=oracle)
+
