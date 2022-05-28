@@ -23,9 +23,10 @@ RESULTS_DELIEVERY = 2500
 REFRESH_FOCUS = 0.005           # little work, consider replace the represtatives
 ROUNDS_BEFORE_REFRESH = 8       # rounds of little work, before force refresh
 REFRESH_FOCUS_SAME_REP = 0.03   # a lot of work, refresh could make the 'focus' array smaller
-ALLOWED_BAD_ROUNDS = 5
+ALLOWED_BAD_ROUNDS = 4
 SLEEP_BEFORE_TRY = 0.03
-STOP_CHUNKING = 0.001
+STOP_CHUNKING = 0.004
+ALLOWED_BAD_CHUNK_PARTITIONING = 1
 REPS_FOR_CHUNK = 3
 RESONABLE_CHUNK = 0.5
 
@@ -309,90 +310,7 @@ class LSHCluster:
                 both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:NUM_HEIGHEST]
                 self.max_score[merged] = [tuple()]
                 self.max_score[center] = both_max_score
-
-    def lsh_clustering(self):
-        """
-        Run the full clustering algorithm: create the number sets for each sequence, then generate a LSH
-        signature for each, and finally iterate L times looking for matching pairs, to be inserted to the
-        same cluster.
-        :return: the updated C_til
-        """
-
-        def _handle_bucket(tasks, results):
-            """
-            The function serves as the target for worker threads created by the 'lsh_clustering' function. Each thread
-            is tasked with getting buckets from the queue, and for each bucket look for pairs of sequences satisfying a
-            pre-determined condition.
-            :param tasks: queue with signatures, serving as the buckets' keys.
-            :param results: queue for storing the results (pairs of sequences)
-            """
-            while True:
-                sig = tasks.get()
-                if sig is None:
-                    tasks.task_done()
-                    break
-                res = set()
-                if len(self.buckets[sig]) > 1:
-                    bucket_ref_points = random.choices(self.buckets[sig], k=REF_PNTS)
-                    for ref in bucket_ref_points:
-                        for elem in self.buckets[sig]:
-                            if elem == ref:
-                                continue
-                            sd = LSHCluster.sorensen_dice(self.numsets[ref], self.numsets[elem])
-                            if sd >= 0.35 or (sd >= 0.3 and edit_dis(LSHCluster.index(self.all_reads[ref]),
-                                                                     LSHCluster.index(self.all_reads[elem])) <= 3):
-                                res.add((ref, elem))
-                                if len(res) > RESULTS_DELIEVERY:
-                                    results.put(res)
-                                    res = set()
-                tasks.task_done()
-                results.put(res)
-            return
-
-        for itr in range(self.L):
-            time_start = time.time()
-            sigs = list()
-            self.buckets = dict()
-            # choose random k elements of the LSH signature
-            indexes = random.sample(range(self.m), self.k)
-            for idx in range(len(self.all_reads)):
-                # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[j]]) * (self.top ** j) for j in range(self.k))
-                sigs.append(sig)
-            # buckets[sig] = [indexes (from all_reads) of (hopefully) similar sequences]
-            for idx in range(len(self.all_reads)):
-                if sigs[idx] in self.buckets:
-                    self.buckets[sigs[idx]].append(idx)
-                else:
-                    self.buckets[sigs[idx]] = [idx]
-            tasks, results, processes = mp.JoinableQueue(), mp.Queue(maxsize=QSIZE), list()
-            for _ in range(self.jobs):
-                processes.append(mp.Process(target=_handle_bucket, args=(tasks, results,)))
-            [p.start() for p in processes]
-            for sig in self.buckets.keys():
-                if len(self.buckets[sig]) > 1:
-                    tasks.put(sig)
-            for _ in range(self.jobs):
-                tasks.put(None)  # poison pill
-
-            liveprocs = list(processes)
-            while liveprocs:
-                try:
-                    while True:
-                        pairs = results.get_nowait()
-                        for pair in pairs:
-                            self.score[pair[1]] += 1
-                            self.score[pair[0]] += 1
-                            self._add_pair(pair[0], pair[1])
-                except queue.Empty:
-                    pass
-                time.sleep(SLEEP_BEFORE_TRY)
-                if not results.empty():
-                    continue
-                liveprocs = [p for p in liveprocs if p.is_alive()]  # implicit join
-            self.duration += time.time() - time_start
-            print("-INFO: time for iteration {} in the algorithm: {}".format(itr + 1, time.time() - time_start))
-
+    
     def chunk_paritioning(self):
         def cmn_substr(x, a, w, t):
             ind = x.find(a)
@@ -407,11 +325,14 @@ class LSHCluster:
         w = max(math.ceil(math.log(len(self.all_reads[0]),4)) - 1, 1)
         t = max(math.ceil(math.log(len(self.all_reads),4)) - 1, w)
         print("-INFO: (common sub-string) params: w = {}, t = {}, repeats = {}".format(w, t, repeats))
-        
+        cnt_bad_rounds = 0
         multi_sigs = 2
         for itr in range(repeats):
             time_itr = time.time()
-            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING:
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING and cnt_bad_rounds < ALLOWED_BAD_CHUNK_PARTITIONING:
+                cnt_bad_rounds += 1
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING and cnt_bad_rounds >= ALLOWED_BAD_CHUNK_PARTITIONING:
+                cnt_bad_rounds = 0
                 if multi_sigs == 2:
                     multi_sigs = 1
                     # take longer substrings if we are using only one sig
@@ -553,68 +474,7 @@ class LSHCluster:
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
             self.duration += time.time() - time_start
             print("-INFO: chunk {}, time for iteration {} in the algorithm: {}".format(chunk_rep, itr + 1, time.time() - time_start))
-
-    def reduced_clustering_chunk_dedicated(self, chunk_rep):
-        print("-INFO: reduced step for chunk with rep {}. size: {}.".format(chunk_rep, len(self.chunks[chunk_rep])))
-        chunk = self.chunks[chunk_rep]
-        tot = time.time()
-        singles_round_end = initial_singles = sum([1 for item in chunk if len(self.C_til[item]) == 1])
-        r = -1
-        bad_rounds = 0
-        working_rate = 0
-        # iters_num = max(MIN_REDUCED_ITERS, int(2 * REDUCED_ITERS_FOR_LINE * len(chunk)))
-        # iters_num = math.ceil(math.sqrt(len(chunk)))
-        iters_num = math.ceil(len(chunk) ** (1/2.1))
-        print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(iters_num))
-        for itr in range(iters_num):
-            time_start = time.time()
-            sigs = list()
-            singles_round_start = sum([1 for item in chunk if len(self.C_til[item]) == 1])
-            if singles_round_start == 0:
-                break
-            work_in_bad_round = math.ceil(math.log(singles_round_end, 4))
-            # reset data structures every 3 iterations
-            if itr % 3 == 0:
-                r = (r + 1) % NUM_HEIGHEST
-                focus = [item for item in chunk if len(self.C_til[item]) == 1]
-                clstr_reps = [item for item in chunk if len(self.C_til[item]) >= 1]
-                for rep in clstr_reps:
-                    if len(self.max_score[rep]) > r and len(self.max_score[rep][r]) > 0:
-                        focus.append(self.max_score[rep][r][0])
-            random.shuffle(focus)
-
-            # choose random k elements of the LSH signature. random.sample faster than np.random.choice for small sizes.
-            indexes = random.sample(range(self.m), self.k)
-            for idx in focus:
-                # represent the sig as a single integer
-                sig = sum(int(self.lsh_sigs[idx][indexes[i]]) * (self.top ** i) for i in range(self.k))
-                sigs.append((idx, sig))
-
-            sigs.sort(key=lambda x: x[1])
-            for a in range(len(sigs) - 1):
-                if sigs[a][1] == sigs[a + 1][1]:
-                    sd = LSHCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.25 or (sd >= 0.22 and edit_dis(LSHCluster.index(self.all_reads[sigs[a][0]]),
-                                                              LSHCluster.index(self.all_reads[sigs[a + 1][0]])) <= 3):
-                        self.score[sigs[a][0]] += 1
-                        self.score[sigs[a + 1][0]] += 1
-                        self._add_pair(sigs[a][0], sigs[a + 1][0])
-
-            singles_round_end = sum([1 for item in chunk if len(self.C_til[item]) == 1])
-            working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1,
-                  time.time() - time_start, working_rate, r, singles_round_start, singles_round_end, singles_round_start - singles_round_end))
-            bad_rounds = bad_rounds + 1 if singles_round_start - singles_round_end <= work_in_bad_round else 0
-            if bad_rounds >= ALLOWED_BAD_ROUNDS:
-                print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
-                break
-
-        success_rate = float(initial_singles - singles_round_end) / initial_singles if initial_singles != 0 else 0
-        self.duration += time.time() - tot
-        print("-INFO: chunk rep: {}, time for a 'reduced clustering' stage: {}. Success rate: {}".format(chunk_rep, time.time() - tot, success_rate))
-        return success_rate
-
-
+    
     def reduced_clustering(self):
         """
         Continue the clustering procedure by mimicing the flow of 'lsh_clustering', centering on the tackling singles.
@@ -631,8 +491,8 @@ class LSHCluster:
         working_rate = 0
         cnt_before_refresh = 0
         focus = list()
-        # iters_num = max(MIN_REDUCED_ITERS, int(REDUCED_ITERS_FOR_LINE * len(self.all_reads)))
-        iters_num = math.ceil(len(self.all_reads) ** (1/2.1))
+
+        iters_num = math.ceil(len(self.all_reads) ** (1/2.2))
         print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
             if itr == 1000 or itr == 800 or itr == 600:
@@ -799,6 +659,7 @@ class Accrcy:
             if max_false + len(org_clstr) < len(alg_clstr):
                 self.cnt_toobig += 1
                 return 0
+        
         for i in range(0, len(alg_clstr)):
             flg_exist = 0
             for j in range(0, len(org_clstr)):
@@ -925,4 +786,3 @@ if __name__ == '__main__':
     print("-INFO: out of them: {} are singles.".format(singles_num))
     lsh = LSHCluster(reads_err, q=6, k=3, m=40, L=32)
     lsh.run(accrcy=oracle)
-
