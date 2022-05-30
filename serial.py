@@ -16,6 +16,7 @@ import numpy as np
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
 INDEX_LEN = 15
+SMALL_INPUT = 3000000
 NUM_HEIGHEST = 5
 REF_PNTS = 12
 QSIZE = 2000000
@@ -67,15 +68,15 @@ class LSHCluster:
         """
         self.all_reads = all_reads
         print("-INFO: size of the input: {}".format(len(self.all_reads)))
+        self.allowed_bad_rounds = max(math.ceil(float(1)/len(self.all_reads)* 10000), ALLOWED_BAD_ROUNDS)
+        print("-INFO: amount of allowed bad rounds: {}".format(self.allowed_bad_rounds))
+        self.L = L
         self.q = q
         self.k = k
         self.m = m
-        self.L = L
         self.top = 4 ** q  # upper boundary for items in numsets
         self.duration = 0  # sum of the all the calculations
         self.base_qgram = [(4 ** pos) for pos in range(self.q)]
-        # self.jobs = max(int(mp.cpu_count() * (2/5)), 1)
-        # print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
         self.buckets = None
 
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
@@ -462,7 +463,7 @@ class LSHCluster:
             print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1,
                   time.time() - time_start, working_rate, r, singles_round_start, singles_round_end, singles_round_start - singles_round_end))
             bad_rounds = bad_rounds + 1 if singles_round_start - singles_round_end <= work_in_bad_round else 0
-            if bad_rounds >= ALLOWED_BAD_ROUNDS:
+            if bad_rounds >= self.allowed_bad_rounds:
                 print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
                 break
 
