@@ -25,7 +25,9 @@ SLEEP_BEFORE_TRY = 0.03
 
 # chunking phase
 STOP_CHUNKING = 0.002  # fraction of the merges done in an iteration out of the size of the input
-ALLOWED_BAD_CHUNK_PARTITIONING = 3  # precentages can drop in MS algo. give it a another change before shut down
+ALLOWED_BAD_CHUNK_PARTITIONING_FIRST = 3 
+ALLOWED_BAD_CHUNK_PARTITIONING_SECOND = 4  # precentages can drop in MS algo. give it a another change before shut down
+
 REPS_FOR_CHUNK = 3
 RESONABLE_CHUNK = 0.5  # chunks we run the LSH clustering algoithm on
 
@@ -310,16 +312,16 @@ class LSH:
         print("-INFO: (common sub-string) params: w = {}, t = {}, max repeats = {}".format(w, t, repeats))
         cnt_bad_rounds = 0
         multi_sigs = 2
+        allowed_bad = ALLOWED_BAD_CHUNK_PARTITIONING_FIRST
         for itr in range(repeats):
             time_itr = time.time()
-            if itr > 0 and float(cnt_merges) / len(
-                    self.all_reads) < STOP_CHUNKING and cnt_bad_rounds < ALLOWED_BAD_CHUNK_PARTITIONING:
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING and cnt_bad_rounds < allowed_bad:
                 cnt_bad_rounds += 1
-            if itr > 0 and float(cnt_merges) / len(
-                    self.all_reads) < STOP_CHUNKING and cnt_bad_rounds >= ALLOWED_BAD_CHUNK_PARTITIONING:
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING and cnt_bad_rounds >= allowed_bad:
                 cnt_bad_rounds = 0
                 if multi_sigs == 2:
                     multi_sigs = 1
+                    allowed_bad = ALLOWED_BAD_CHUNK_PARTITIONING_SECOND
                     # take longer substrings if we are using only one sig
                     w = math.ceil(math.log(len(self.all_reads[0]), 4))
                     t = max(math.ceil(math.log(len(self.all_reads), 4)), w)
@@ -426,7 +428,8 @@ class LSH:
             for a in range(0, len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
                     sd = LSH.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.32 or (sd >= 0.28 and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= 3):
+                    if sd >= 0.32 or (
+                            sd >= 0.28 and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= 3):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
@@ -489,7 +492,8 @@ class LSH:
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
                     sd = LSH.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.25 or (sd >= 0.22 and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= 3):
+                    if sd >= 0.25 or (
+                            sd >= 0.22 and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= 3):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
@@ -519,12 +523,12 @@ class LSH:
         :param accrcy: True for printing accuracy results. False otherwise.
         """
         self.chunk_paritioning()
-
+        '''
         debug_time = time.time()
         self.check_all_clusters_spread()
         self.check_all_chunks_goodness()
         self.duration -= (time.time() - debug_time)
-
+        '''
         lsh_cls_time = time.time()
         self.avg_chunk = mean(
             [len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1])
