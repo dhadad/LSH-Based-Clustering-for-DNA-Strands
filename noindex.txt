@@ -13,30 +13,15 @@ import traceback
 from Levenshtein import distance
 
 # **********************************
-#   Globals & Auxiliary functions
+#   Globals
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
-NUM_HEIGHEST = 5  # we keep track of the 5 best representatives in a cluster
 
-# multiprocessing consts
+# multiprocessing consts:
+CPUS = 2 / 5
 QSIZE = 2000000
 RESULTS_DELIEVERY = 2500
 SLEEP_BEFORE_TRY = 0.03
-
-# chunking phase
-STOP_CHUNKING = 0.002  # fraction of the merges done in an iteration out of the size of the input
-ALLOWED_BAD_CHUNK_PARTITIONING_FIRST = 3 
-ALLOWED_BAD_CHUNK_PARTITIONING_SECOND = 4  # precentages can drop in MS algo. give it a another change before shut down
-
-REPS_FOR_CHUNK = 3
-RESONABLE_CHUNK = 0.5  # chunks we run the LSH clustering algoithm on
-
-# final clustering phase
-REFRESH_FOCUS = 0.005  # little work, consider replace the represtatives
-ROUNDS_BEFORE_REFRESH = 8  # rounds of little work, before force refresh
-REFRESH_FOCUS_SAME_REP = 0.03  # a lot of work, refresh could make the 'focus' array smaller
-ALLOWED_BAD_ROUNDS = 4
-# WORK_IN_BAD_ROUND = 0.0000025
 
 
 # **********************************
@@ -44,7 +29,7 @@ ALLOWED_BAD_ROUNDS = 4
 # **********************************
 
 class LSH:
-    def __init__(self, all_reads, q, k, m, L):
+    def __init__(self, all_reads, q, k, m, L, reps_per_cluster=5, reps_per_chunk=3, allowed_bad_rounds=4, accrcy=False, outfile=None):
         """
         Initiate an object dedicated for clustering the DNA sequences in 'all_reads'.
         The function just makes ready the necessary data structures. For the starting the clustering
@@ -54,13 +39,26 @@ class LSH:
         :param q: length of the divided sub-sequences (Q-grams)
         :param k: number of MH signatures in a LSH signature
         :param L: number of iterations of the algorithm
+        :param reps_per_cluster: representatives to keep for each cluster. uses the score mechanism: 
+            the sequences with the highest score in the cluster are kept.
+        :param rep_per_chunk: similar to 'reps_per_cluster', used for the chunk partitioning part.
+        :param allowed_bad_rounds: number of bad rounds (rounds with a relatively little amount of work) before quitting the procedure
+            (in the final clustering step).
+        :param accrcy: True for printing accuracy results. False otherwise.
+        :param outfile: path to destination file.
         """
+        self.outfile = outfile
+        self.accrcy = accrcy
         self.all_reads = all_reads
         print("-INFO: size of the input: {}".format(len(self.all_reads)))
-        self.allowed_bad_rounds = max(math.ceil(float(1) / len(self.all_reads) * 10000), ALLOWED_BAD_ROUNDS)
+
+        # if the input is extremely small, more bad rounds are allowed as they are cheap
+        self.allowed_bad_rounds = min(max(math.ceil(float(1) / len(self.all_reads) * (10 ** 7)), allowed_bad_rounds), 1000)
         print("-INFO: amount of allowed bad rounds: {}".format(self.allowed_bad_rounds))
         self.work_in_bad_round = math.ceil(len(self.all_reads) ** (1 / 5))
         print("-INFO: singles handeled in a bad round: {}".format(self.work_in_bad_round))
+        self.reps_per_cluster = reps_per_cluster
+        self.reps_per_chunk = reps_per_chunk
         self.L = L
         self.q = q
         self.k = k
@@ -68,7 +66,7 @@ class LSH:
         self.top = 4 ** q  # upper boundary for items in numsets
         self.duration = 0  # sum of the all the calculations
         self.base_qgram = [(4 ** pos) for pos in range(self.q)]
-        self.jobs = max(int(mp.cpu_count() * (2 / 5)), 1)
+        self.jobs = max(int(mp.cpu_count() * (CPUS)), 1)
         print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
         self.buckets = None
 
@@ -292,12 +290,23 @@ class LSH:
                 if not found_2:
                     both_max_score.append((elem_2, self.score[elem_2]))
 
-                both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:NUM_HEIGHEST]
+                both_max_score = sorted(both_max_score, reverse=True, key=lambda t: t[1])[:self.reps_per_cluster]
                 self.max_score[merged] = [tuple()]
                 self.max_score[center] = both_max_score
 
-    def chunk_paritioning(self):
+    def chunk_partitioning(self, min_work=0.002, allowed_bad_rounds_first=3, allowed_bad_rounds_second=4):
+        """
+        Divides the nosiy copies into chunks, hopefully resembling the clusters. uses common sub-strings as a way to 
+        approximate similiarity between sequences.
+        :param min_work: float, work (number of merges out of the total size of the input) is required to meet this threshold.
+        :param allowed_bad_rounds_first: integer, number allowed rounds with low amount of work before moving towards 
+            different signatures. precentages can drop, so we  give it a another change before giving up
+        :param allowed_bad_rounds_second: integer, number allowed rounds with low amount of work before quiting the procedure.
+        """
         def cmn_substr(x, a, w, t):
+            """
+            Create the signature, which is a sub-string of the original sequence.
+            """
             ind = x.find(a)
             if ind == -1:
                 ind = 0
@@ -312,16 +321,16 @@ class LSH:
         print("-INFO: (common sub-string) params: w = {}, t = {}, max repeats = {}".format(w, t, repeats))
         cnt_bad_rounds = 0
         multi_sigs = 2
-        allowed_bad = ALLOWED_BAD_CHUNK_PARTITIONING_FIRST
+        allowed_bad = allowed_bad_rounds_first
         for itr in range(repeats):
             time_itr = time.time()
-            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING and cnt_bad_rounds < allowed_bad:
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < min_work and cnt_bad_rounds < allowed_bad:
                 cnt_bad_rounds += 1
-            if itr > 0 and float(cnt_merges) / len(self.all_reads) < STOP_CHUNKING and cnt_bad_rounds >= allowed_bad:
+            if itr > 0 and float(cnt_merges) / len(self.all_reads) < min_work and cnt_bad_rounds >= allowed_bad:
                 cnt_bad_rounds = 0
                 if multi_sigs == 2:
                     multi_sigs = 1
-                    allowed_bad = ALLOWED_BAD_CHUNK_PARTITIONING_SECOND
+                    allowed_bad = allowed_bad_rounds_second
                     # take longer substrings if we are using only one sig
                     w = math.ceil(math.log(len(self.all_reads[0]), 4))
                     t = max(math.ceil(math.log(len(self.all_reads), 4)), w)
@@ -337,12 +346,12 @@ class LSH:
             for chunk in self.chunks:
                 if len(chunk) == 0:
                     continue
-                elif len(chunk) <= REPS_FOR_CHUNK:
+                elif len(chunk) <= self.reps_per_chunk:
                     for idx in chunk:
                         full_sig = sorted(cmn_substr(self.all_reads[idx], a, w, t) for a in sigs)
                         common_substr_hash.append((idx, full_sig))
                 else:
-                    idxs = random.choices(chunk, k=REPS_FOR_CHUNK)
+                    idxs = random.choices(chunk, k=self.reps_per_chunk)
                     for idx in idxs:
                         full_sig = sorted(cmn_substr(self.all_reads[idx], a, w, t) for a in sigs)
                         common_substr_hash.append((idx, full_sig))
@@ -413,7 +422,16 @@ class LSH:
         print("-INFO: (number of chunks with size 1: {})".format(
             sum([1 for rep in range(len(self.chunks)) if len(self.chunks[rep]) == 1])))
 
-    def clustering_pre_chunk(self, chunk_rep):
+    def clustering_pre_chunk(self, chunk_rep, sd_high=0.32, sd_low=0.28, distance_threshold=12):
+        """
+        LSH based clustering done in respect to a single chunks.
+        :param chunk_rep: integer, the index of the representative of the chunk
+        :param sd_high: threshold for sorensen dice similarity from which we merge the clusters.
+        :param sd_low: threshold for sorensen dice similarity from which we merge the clusters
+            only if the edit distance is low enough
+        :param distance_threshold: maximal edit distance between sequences for merging their clusters
+            (in case the sorensen dice similarity was sufficient)
+        """
         base = [(self.top ** i) for i in range(self.k)]
         for itr in range(self.L):
             time_start = time.time()
@@ -428,8 +446,7 @@ class LSH:
             for a in range(0, len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
                     sd = LSH.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.32 or (
-                            sd >= 0.28 and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= 3):
+                    if sd >= sd_high or (sd >= sd_low and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= distance_threshold):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
@@ -437,10 +454,23 @@ class LSH:
             print("-INFO: chunk {}, time for iteration {} in the algorithm: {}".format(chunk_rep, itr + 1,
                                                                                        time.time() - time_start))
 
-    def final_clustering(self):
+    def final_clustering(self, sd_high=0.25, sd_low=0.22, distance_threshold=12, low_work_rate=0.005, high_work_rate=0.03, rounds_before_refresh=8):
         """
         Clustering via LSH signatures. Uses a limited amount of representatives from each cluster. All the clusters
         take part of this stage togather (not chunk dedicated)
+        :param sd_high: threshold for sorensen dice similarity from which we merge the clusters.
+        :param sd_low: threshold for sorensen dice similarity from which we merge the clusters
+            only if the edit distance is low enough
+        :param distance_threshold: maximal edit distance between sequences for merging their clusters
+            (in case the sorensen dice similarity was sufficient)
+        :param low_work_rate: float, work done in a round (number of singles that were handles, divided by the number of
+            singles in the beginning) should be higher than this constant. otherwise, little work was done consider replace the
+            represtatives (refresh the 'focus' array)
+        :param high_work_rate: float, if work done in a round (number of singles that were handles, divided by the number of
+            singles in the beginning) is higher than this, then we should refresh the 'focus' array as it's not relevant anymore.
+            but in this case we don't relace the 'kind' of the representative (variable r). that is, if we used the one with the best-score,
+            we continue using the representatives with the second-best score.
+        :param rounds_before_refresh: integer, the number of rounds of working rate lower than 'low_work_rate' before refreshing.
         """
         tot = time.time()
         debug_time = 0
@@ -453,9 +483,9 @@ class LSH:
         focus = list()
 
         iters_num = math.ceil(len(self.all_reads) ** (1 / 2.2))
-        print("-INFO: maximum iterations if the reduced LSH clustring step: {}".format(iters_num))
+        print("-INFO: maximum iterations of the reduced LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
-            if itr > 0 and itr % 200 == 0:      # DEUBG PRINTS
+            if itr > 0 and itr % 200 == 0 and self.accrcy:      # DEUBG PRINTS
                 time_measure = time.time()
                 print_accrcy(self.C_til, C_dict, C_reps, reads_err)
                 debug_time += (time.time() - time_measure)
@@ -466,13 +496,13 @@ class LSH:
                 break
 
             # reset data structures
-            cnt_before_refresh = cnt_before_refresh + 1 if working_rate <= REFRESH_FOCUS else 0
-            refresh = itr % 5 == 0 and working_rate >= REFRESH_FOCUS_SAME_REP
-            change_r = itr % 20 == 0 or cnt_before_refresh >= ROUNDS_BEFORE_REFRESH
+            cnt_before_refresh = cnt_before_refresh + 1 if working_rate <= low_work_rate else 0
+            refresh = itr % 5 == 0 and working_rate >= high_work_rate
+            change_r = itr % 20 == 0 or cnt_before_refresh >= rounds_before_refresh
             if change_r or refresh:
                 print("-INFO: refreshing 'focus' array")
                 if change_r:
-                    r = (r + 1) % NUM_HEIGHEST
+                    r = (r + 1) % self.reps_per_cluster
                 focus = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
                 clstr_reps = [center for center, clstr in self.C_til.items() if len(clstr) > 1]
                 for rep in clstr_reps:
@@ -492,8 +522,7 @@ class LSH:
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
                     sd = LSH.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= 0.25 or (
-                            sd >= 0.22 and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= 3):
+                    if sd >= sd_high or (sd >= sd_low and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= distance_threshold):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
@@ -506,7 +535,6 @@ class LSH:
                                                                                             singles_round_start,
                                                                                             singles_round_end,
                                                                                             singles_round_start - singles_round_end))
-            # bad_rounds = bad_rounds + 1 if singles_round_start - singles_round_end <= work_in_bad_round else 0
             bad_rounds = bad_rounds + 1 if (singles_round_start - singles_round_end) <= self.work_in_bad_round else 0
             if bad_rounds >= self.allowed_bad_rounds:
                 print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
@@ -517,21 +545,27 @@ class LSH:
         print("-INFO: time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot - debug_time, success_rate))
         return success_rate
 
-    def print_result(self, outfile):
-        with open(outfile, 'w') as f:
+    def print_result(self):
+        """
+        Prints the resulted clustering into a file.
+        """
+        if self.outfile is None:
+            return
+        print("=INFO: printing to {}".format(self.outfile))
+        with open(self.outfile, 'w') as f:
             for cluster in self.C_til.values():
                 if len(cluster) == 0:
                     continue
                 txt = ['<empty>', '*****************************'] + [self.all_reads[seq_idx] for seq_idx in cluster] + ['\n\n']         
                 f.write('\n'.join(txt))
 
-    def run(self, accrcy=True, outfile=None):
+    def run(self, resonable_chunk=0.5):
         """
-        To be used in order to preform the whole algorithm flow.
-        :param accrcy: True for printing accuracy results. False otherwise.
-        :param outfile: path to destination file.
+        Preforms the whole algorithm flow.
+        :param resonable_chunk: float, fraction of a chunk's size out of the average size for a chunk. minimal size
+            in order to preform the clustering algorithm for this chunk.
         """
-        self.chunk_paritioning()
+        self.chunk_partitioning()
         '''
         debug_time = time.time()
         self.check_all_clusters_spread()
@@ -543,25 +577,24 @@ class LSH:
             [len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1])
         print("-INFO: average chunk size (threshold for basic clustring step): {}".format(self.avg_chunk))
         print("-INFO: chunks to be analyzed: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(
-            self.chunks[chunk_rep]) >= RESONABLE_CHUNK * self.avg_chunk))))
+            self.chunks[chunk_rep]) >= resonable_chunk * self.avg_chunk))))
         print("-INFO: chunks to be ignored: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if
-                                                            len(self.chunks[chunk_rep]) > 0 and len(self.chunks[chunk_rep]) < RESONABLE_CHUNK * self.avg_chunk))))
+                                                            len(self.chunks[chunk_rep]) > 0 and len(self.chunks[chunk_rep]) < resonable_chunk * self.avg_chunk))))
         for chunk_rep in range(len(self.chunks)):
-            if len(self.chunks[chunk_rep]) >= RESONABLE_CHUNK * self.avg_chunk:
+            if len(self.chunks[chunk_rep]) >= resonable_chunk * self.avg_chunk:
                 time_itr = time.time()
                 self.clustering_pre_chunk(chunk_rep)
                 print("-INFO: time for chunk with rep {}: {}".format(chunk_rep, time.time() - time_itr))
                 print("++++++++++++++++++++++++++++++++++++++++++++++++++")
         print("-INFO: time for work done in chunks: {}".format(time.time() - lsh_cls_time))
-        if accrcy:
+        if self.accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("-INFO: Final Clustering Step:")
         self.final_clustering()
-        if accrcy:
+        if self.accrcy:
             print_accrcy(self.C_til, C_dict, C_reps, reads_err)
         print("-INFO: Total time: {}".format(self.duration))
-        if outfile is not None:
-            self.print_result(outfile)
+        self.print_result()
 
 
 # **********************************
@@ -758,5 +791,5 @@ if __name__ == '__main__':
     singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
     print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
     print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSH(reads_err, q=6, k=3, m=40, L=32)
-    lsh.run(accrcy=oracle, outfile=out_file)
+    lsh = LSH(reads_err, q=6, k=3, m=40, L=32, accrcy=oracle, outfile=out_file)
+    lsh.run()
