@@ -64,10 +64,8 @@ class LSHBasedCluster:
         self.distance_threshold = distance_threshold
 
         # handle logging
-        logging.basicConfig(level=logging.INFO, format='%(message)s')
-        logger = logging.getLogger()
-        logger.addHandler(logging.FileHandler(log_file, 'w'))
-        sys.stdout.write = logger.info
+        log = open(log_file, 'w')
+        sys.stdout = log
 
         self.technology = chosen_technology
         if platform.system() == "Linux":

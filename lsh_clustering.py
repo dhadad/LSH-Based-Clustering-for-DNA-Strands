@@ -11,7 +11,6 @@ import math
 import traceback
 from Levenshtein import distance
 import platform
-import logging
 import sys
 
 # from simulator import *
@@ -65,10 +64,8 @@ class LSHBasedCluster:
         self.distance_threshold = distance_threshold
 
         # handle logging
-        logging.basicConfig(level=logging.INFO, format='%(message)s')
-        logger = logging.getLogger()
-        logger.addHandler(logging.FileHandler(log_file, 'w'))
-        sys.stdout.write = logger.info
+        log = open(log_file, 'w')
+        sys.stdout = log
 
         self.all_reads = []
         self.original_strand_dict = {}  # map from orig strand id to the actual strand
