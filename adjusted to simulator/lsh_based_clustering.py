@@ -392,7 +392,7 @@ class LSHBasedCluster:
         cnt_before_refresh = 0
         focus = list()
 
-        iters_num = math.ceil(len(self.all_reads) ** (1 / 2.1))
+        iters_num = max(math.ceil(len(self.all_reads) ** (1 / 2.2)), 300)
         print("-INFO: maximum iterations of the reduced LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
             if itr > 0 and itr % 200 == 0 and self.accrcy:      # DEUBG PRINTS
