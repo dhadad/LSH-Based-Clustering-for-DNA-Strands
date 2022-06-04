@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # **********************************
 #   Imports
 # **********************************
@@ -11,12 +10,16 @@ import queue
 import math
 import traceback
 from Levenshtein import distance
+import platform
+import logging
+import sys
+
+# from simulator import *
 
 # **********************************
 #   Globals
 # **********************************
 BASE_VALS = {"A": 0, "C": 1, "G": 2, "T": 3}
-
 # multiprocessing consts:
 CPUS = 2 / 5
 QSIZE = 2000000
@@ -28,30 +31,54 @@ SLEEP_BEFORE_TRY = 0.03
 #   Main class
 # **********************************
 
-class LSH:
-    def __init__(self, all_reads, q, k, m, L, reps_per_cluster=5, reps_per_chunk=3, allowed_bad_rounds=4, accrcy=False, outfile=None):
+class LSHBasedCluster:
+    def __init__(self, evyat_path,
+                 log_file='log.txt',
+                 chosen_technology='minion_idt',
+                 q=6, k=3, m=40, L=32, distance_threshold=12,
+                 report_func=None,
+                 reps_per_cluster=5, reps_per_chunk=3, allowed_bad_rounds=4,
+                 accrcy=True):
         """
-        Initiate an object dedicated for clustering the DNA sequences in 'all_reads'.
-        The function just makes ready the necessary data structures. For the starting the clustering
-        process use the 'run' method.
-        :param all_reads: array of strings, each: a DNA sequence from the input
+        Initiate an object dedicated for clustering the DNA sequences
+        :param chosen_technology: string, synthesizing technology used in generating the errors
         :param m: size of the LSH signature
         :param q: length of the divided sub-sequences (Q-grams)
         :param k: number of MH signatures in a LSH signature
         :param L: number of iterations of the algorithm
-        :param reps_per_cluster: representatives to keep for each cluster. uses the score mechanism: 
+        :param reps_per_cluster: representatives to keep for each cluster. uses the score mechanism:
             the sequences with the highest score in the cluster are kept.
-        :param rep_per_chunk: similar to 'reps_per_cluster', used for the chunk partitioning part.
-        :param allowed_bad_rounds: number of bad rounds (rounds with a relatively little amount of work) before quitting the procedure
-            (in the final clustering step).
-        :param accrcy: True for printing accuracy results. False otherwise.
-        :param outfile: path to destination file.
+        :param rep_per_chunk: similar to 'reps_per_cluster', used for the chunk partitioning part
+        :param allowed_bad_rounds: number of bad rounds (rounds with a relatively little amount of work) before
+            quitting the procedure (in the final clustering step).
+        :param distance_threshold: maximal edit distance between sequences for merging their clusters
+            (in case the sorensen dice similarity was sufficient)
+        :param accrcy: True for printing accuracy results during the run
         """
-        self.outfile = outfile
+        self.L = L
+        self.q = q
+        self.k = k
+        self.m = m
+        self.top = 4 ** q  # upper boundary for items in numsets
+        self.evyat_path = evyat_path
         self.accrcy = accrcy
-        self.all_reads = all_reads
-        print("-INFO: size of the input: {}".format(len(self.all_reads)))
+        self.distance_threshold = distance_threshold
 
+        # handle logging
+        logging.basicConfig(level=logging.INFO, format='%(message)s')
+        logger = logging.getLogger()
+        logger.addHandler(logging.FileHandler(log_file, 'w'))
+        sys.stdout.write = logger.info
+
+        self.all_reads = []
+        self.original_strand_dict = {}  # map from orig strand id to the actual strand
+        self.reads_err_original_strand_dict = {}  # map from read_err to it's orig strand id
+        self.C_reps = []  # C_reps = [(Read, Cluster rep of the cluster to which the read belongs to)]
+        self.C_dict = {}  # C_dict = {Cluster rep: All the Reads that belong to that cluster}
+        self.process_input()
+
+        self.tmp_bar = 0
+        self.total_bar_size = 0
         # if the input is extremely small, more bad rounds are allowed as they are cheap
         self.allowed_bad_rounds = min(max(math.ceil(float(1) / len(self.all_reads) * (10 ** 7)), allowed_bad_rounds), 1000)
         print("-INFO: amount of allowed bad rounds: {}".format(self.allowed_bad_rounds))
@@ -59,47 +86,94 @@ class LSH:
         print("-INFO: singles handeled in a bad round: {}".format(self.work_in_bad_round))
         self.reps_per_cluster = reps_per_cluster
         self.reps_per_chunk = reps_per_chunk
-        self.L = L
-        self.q = q
-        self.k = k
-        self.m = m
-        self.top = 4 ** q  # upper boundary for items in numsets
         self.duration = 0  # sum of the all the calculations
+        self.avg_chunk = None
         self.base_qgram = [(4 ** pos) for pos in range(self.q)]
-        self.jobs = max(int(mp.cpu_count() * (CPUS)), 1)
-        print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # for 1 for main thread
-        self.buckets = None
 
         # array of clusters: C_til[rep] = [reads assigned to the cluster]
-        self.C_til = {idx: [idx] for idx in range(len(all_reads))}
+        self.C_til = {idx: [idx] for idx in range(len(self.all_reads))}
 
         # array for tracking the sequences with the highest score in the cluster
-        self.max_score = [[(idx, 0)] for idx in range(len(all_reads))]
+        self.max_score = [[(idx, 0)] for idx in range(len(self.all_reads))]
 
         # array for tracking the scores
-        self.score = [0 for _ in range(len(all_reads))]
+        self.score = [0 for _ in range(len(self.all_reads))]
 
         # mapping between a sequence's index to it's parent's index
-        self.parent = [idx for idx in range(len(all_reads))]
+        self.parent = [idx for idx in range(len(self.all_reads))]
+
+        # handle first step of the algorithm, partition into chunks
+        self.chunks = [[idx] for idx in range(len(self.all_reads))]
+        self.chunk_parent = [idx for idx in range(len(self.all_reads))]
 
         # calculate singatures upon initializing the object
+        if platform.system() == "Linux":
+            self.numsets, self.lsh_sigs = dict(), dict()
+            self._numsets, self._lsh_sigs = self._numsets_mul, self._lsh_sigs_mul
+            self.jobs = max(int(mp.cpu_count() * CPUS), 1)
+            print("-INFO: CPU's to be used: {}".format(self.jobs + 1))  # 1 for main thread
+        else:
+            self.numsets, self.lsh_sigs = list(), list()
+            self._numsets, self._lsh_sigs = self._numsets_ser, self._lsh_sigs_ser
         self.perms = list()
-        self.numsets = dict()
         self._numsets()
-        self.lsh_sigs = dict()
         self._lsh_sigs()
 
-        self.chunks = [[idx] for idx in range(len(all_reads))]
-        self.chunk_parent = [idx for idx in range(len(all_reads))]
+    def process_input(self):
+        """
+        Set the data structures having the nosiy DNA copies. self.all_reads is the one we use thorugh the
+        algorithm. The rest are used for accuracy computation.
+        """
+        C_rev = {}  # C_rev = {<nosiy_copy>: index in self.all_reads}
+        C_org_rev = {}  # C_org_rev = {<line_from_data>: index in self.original_strand_dict}
+        strand_id = 0
+        rep = None
+        with open(self.evyat_path, 'r') as evyat_f:
+            print("-INFO: using dataset: {}".format(self.evyat_path))
+            prev_line = ''
+            for line in evyat_f:
+                line = line.strip()
+                if line != "":
+                    if line[0] == '*':
+                        if len(self.C_reps) > 0:
+                            self.C_dict[rep].pop()
+                            self.C_reps.pop()
+                        rep = prev_line
+                        self.original_strand_dict.update({strand_id: rep})
+                        C_org_rev[rep] = strand_id
+                        strand_id += 1
+                        self.C_dict[rep] = []
+                    elif rep is not None:
+                        self.C_dict[rep].append(line)
+                        self.C_reps.append((line, rep))
+                    prev_line = line
+        self.C_reps.sort(key=lambda x: x[0])  # useful in printing accuracy results, using binary search
+        for i in range(len(self.C_reps)):
+            self.all_reads.append(self.C_reps[i][0])
+
+        random.shuffle(self.all_reads)  # otherwise, the nosiy copies are in the order of the true clusters
+        for i in range(len(self.all_reads)):
+            C_rev[self.all_reads[i]] = i
+
+        for i in range(len(self.C_reps)):
+            self.reads_err_original_strand_dict.update({C_rev[self.C_reps[i][0]]: C_org_rev[self.C_reps[i][1]]})
+        del C_org_rev
+        del C_rev
+        self.read_err_dict = {}
+        self.reads_err_ind = [0] * (len(self.all_reads))
+        for i in range(0, len(self.all_reads)):
+            self.read_err_dict.update({i: self.all_reads[i]})
+            self.reads_err_ind[i] = (i, self.all_reads[i])
+        print("-INFO: size of the input: {}".format(len(self.all_reads)))
 
     def rep_find(self, inp, chunks=False):
         """
         Obtain the representative of the cluster a given sequence is related to.
         In the beginning, for each sequence the "parent" is itself.
-        Not using cache as values can be updated as the algorithm progress.
         In addition, updates the items in the path from 'inp' to its topmost ancestor, in order to achieve
         amortized complexity of log*(n) when getting the parent of an element.
         :param inp: the unique index of the sequence
+        :param chunks: boolean. which 'parent' array are we referring to.
         :return: the parent's index.
         """
         parent = self.chunk_parent if chunks else self.parent
@@ -142,10 +216,44 @@ class LSH:
             numset.append(tot)
         return numset
 
-    def _numsets(self):
+    def _numsets_ser(self):
         """
         Generate the numbers sets for all the sequences. Creates a dictionary, mapping a number set for
         each sequence in the input, while the key is the index of the sequence in all_reads
+        Serial Implementation
+        """
+        time_start = time.time()
+        for seq_idx in range(0, len(self.all_reads)):
+            self.numsets.append(self._single_numset(seq_idx, self.q))
+        self.duration += time.time() - time_start
+        print("-INFO: time to create number set for each sequence: {}".format(time.time() - time_start))
+
+    def _lsh_sigs_ser(self):
+        """
+        Calculate the LSH signatures of all the sequences in the input
+        Serial implementation
+        """
+        time_start = time.time()
+        # generate m permutations.
+        vals = [num for num in range(self.top)]
+        for _ in range(self.m):
+            random.shuffle(vals)
+            self.perms.append(vals.copy())
+        for seq_idx in range(len(self.all_reads)):
+            sig = [0] * self.m
+            for perm_idx in range(self.m):
+                sig[perm_idx] = min(
+                    [self.perms[perm_idx][int(num)] for num in self.numsets[seq_idx]])  # append a MH signature
+            self.lsh_sigs.append(sig)
+        del self.perms
+        self.duration += time.time() - time_start
+        print("-INFO: time to create LSH signatures for each sequence: {}".format(time.time() - time_start))
+
+    def _numsets_mul(self):
+        """
+        Generate the numbers sets for all the sequences. Creates a dictionary, mapping a number set for
+        each sequence in the input, while the key is the index of the sequence in all_reads
+        Multiprocessed implementation
         """
 
         def _create_numset(tasks, results):
@@ -192,9 +300,10 @@ class LSH:
         self.duration += time.time() - time_start
         print("-INFO: time to create number set for each sequence: {}".format(time.time() - time_start))
 
-    def _lsh_sigs(self):
+    def _lsh_sigs_mul(self):
         """
-        Calculate the LSH signatures of all the sequences in the input.
+        Calculate the LSH signatures of all the sequences in the input
+        Multiprocessed implementation
         """
 
         def _create_lsh_sig(tasks, results):
@@ -294,15 +403,19 @@ class LSH:
                 self.max_score[merged] = [tuple()]
                 self.max_score[center] = both_max_score
 
-    def chunk_partitioning(self, min_work=0.002, allowed_bad_rounds_first=3, allowed_bad_rounds_second=4):
+    def chunk_partitioning(self,
+                           min_work=0.002,
+                           allowed_bad_rounds_first=3,
+                           allowed_bad_rounds_second=4):
         """
-        Divides the nosiy copies into chunks, hopefully resembling the clusters. uses common sub-strings as a way to 
+        Divides the nosiy copies into chunks, hopefully resembling the clusters. uses common sub-strings as a way to
         approximate similiarity between sequences.
-        :param min_work: float, work (number of merges out of the total size of the input) is required to meet this threshold.
-        :param allowed_bad_rounds_first: integer, number allowed rounds with low amount of work before moving towards 
-            different signatures. precentages can drop, so we  give it a another change before giving up
-        :param allowed_bad_rounds_second: integer, number allowed rounds with low amount of work before quiting the procedure.
+        :param min_work: float, work (merges out of the total size of the input) is required to meet this threshold
+        :param allowed_bad_rounds_first: integer, number of allowed rounds with low amount of work before moving towards
+            different signatures. percentages can drop, so we  give it a another change before giving up
+        :param allowed_bad_rounds_second: integer, number allowed rounds with little work before quiting the procedure
         """
+
         def cmn_substr(x, a, w, t):
             """
             Create the signature, which is a sub-string of the original sequence.
@@ -341,7 +454,6 @@ class LSH:
 
             sigs = [''.join(random.choice('ACGT') for _ in range(w)) for _ in range(multi_sigs)]
             cnt_merges = 0
-            a = ''.join(random.choice('ACGT') for _ in range(w))
             common_substr_hash = []
             for chunk in self.chunks:
                 if len(chunk) == 0:
@@ -368,69 +480,17 @@ class LSH:
                         self.chunks[merged] = []
                         self.chunk_parent[merged] = center
             print("-INFO: (common sub-string) iteration {} took: {} for {} merges - {} with {} sigs"
-                .format(itr, time.time() - time_itr, cnt_merges, float(cnt_merges) / len(self.all_reads), multi_sigs))
+                  .format(itr, time.time() - time_itr, cnt_merges, float(cnt_merges) / len(self.all_reads), multi_sigs))
         self.duration += time.time() - time_start
         print("-INFO: End Stage: Common sub-string step took: {}".format(time.time() - time_start))
 
-    def check_all_clusters_spread(self):
-        def cluster_spread_accros_chunks(rep):
-            """
-            For debug
-            :param: rep: string, DNA strand from the real data.
-            """
-            org_clstr = C_dict[rep]
-            count_chunks = 0
-            chunk_reps = dict()
-            for seq in org_clstr:
-                seq_ind = C_rev[seq]
-                chunk_rep = self.rep_find(seq_ind, chunks=True)
-                # print("chunk rep: ", chunk_rep)
-                if chunk_rep not in chunk_reps:
-                    chunk_reps[chunk_rep] = True
-                    count_chunks += 1
-            print("cluster spread accros {} chunks".format(count_chunks))
-            return count_chunks
-
-        for rep in C_dict.keys():
-            if len(C_dict[rep]) > 0:
-                cluster_spread_accros_chunks(rep)
-
-    def check_all_chunks_goodness(self):
-        def chunk_goodness(rep):
-            """
-            For debug
-            :param rep: integer, the index of a representative of a cluster
-            """
-            rep = self.rep_find(rep, chunks=True)
-            chunk = self.chunks[rep]
-            # check how many clusters inside the chunk
-            clstr_reps = dict()
-            count_clstrs = 0
-            for seq_idx in chunk:
-                clstr_rep = rep_in_C(self.all_reads[seq_idx], C_reps)
-                if clstr_rep not in clstr_reps:
-                    clstr_reps[clstr_rep] = True
-                    count_clstrs += 1
-            print("chunk with rep {} has items from {} different clusters".format(rep, count_clstrs))
-            return count_clstrs
-
-        for chunk_rep in range(len(self.chunks)):
-            if len(self.chunks[chunk_rep]) > 0:
-                chunk_goodness(chunk_rep)
-        print("-INFO: total number of chunks:",
-              sum([1 for rep in range(len(self.chunks)) if len(self.chunks[rep]) > 0]))
-        print("-INFO: (number of chunks with size 1: {})".format(
-            sum([1 for rep in range(len(self.chunks)) if len(self.chunks[rep]) == 1])))
-
-    def clustering_pre_chunk(self, chunk_rep, sd_high=0.32, sd_low=0.28, distance_threshold=12):
+    def clustering_pre_chunk(self, chunk_rep, sd_high=0.32, sd_low=0.28):
         """
         LSH based clustering done in respect to a single chunks.
         :param chunk_rep: integer, the index of the representative of the chunk
         :param sd_high: threshold for sorensen dice similarity from which we merge the clusters.
         :param sd_low: threshold for sorensen dice similarity from which we merge the clusters
             only if the edit distance is low enough
-        :param distance_threshold: maximal edit distance between sequences for merging their clusters
-            (in case the sorensen dice similarity was sufficient)
         """
         base = [(self.top ** i) for i in range(self.k)]
         for itr in range(self.L):
@@ -445,32 +505,37 @@ class LSH:
             sigs.sort(key=lambda x: x[1])
             for a in range(0, len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
-                    sd = LSH.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= sd_high or (sd >= sd_low and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= distance_threshold):
+                    sd = LSHBasedCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
+                    if sd >= sd_high or \
+                            (sd >= sd_low and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= self.distance_threshold):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
             self.duration += time.time() - time_start
-            print("-INFO: chunk {}, time for iteration {} in the algorithm: {}".format(chunk_rep, itr + 1,
-                                                                                       time.time() - time_start))
+            print("-INFO: chunk {}, time for iteration {} in the algorithm: {}"
+                  .format(chunk_rep, itr + 1, time.time() - time_start))
 
-    def final_clustering(self, sd_high=0.25, sd_low=0.22, distance_threshold=12, low_work_rate=0.005, high_work_rate=0.03, rounds_before_refresh=8):
+    def final_clustering(self,
+                         sd_high=0.25,
+                         sd_low=0.22,
+                         low_work_rate=0.005,
+                         high_work_rate=0.03,
+                         rounds_before_refresh=8):
         """
         Clustering via LSH signatures. Uses a limited amount of representatives from each cluster. All the clusters
         take part of this stage togather (not chunk dedicated)
         :param sd_high: threshold for sorensen dice similarity from which we merge the clusters.
         :param sd_low: threshold for sorensen dice similarity from which we merge the clusters
             only if the edit distance is low enough
-        :param distance_threshold: maximal edit distance between sequences for merging their clusters
-            (in case the sorensen dice similarity was sufficient)
         :param low_work_rate: float, work done in a round (number of singles that were handles, divided by the number of
-            singles in the beginning) should be higher than this constant. otherwise, little work was done consider replace the
-            represtatives (refresh the 'focus' array)
-        :param high_work_rate: float, if work done in a round (number of singles that were handles, divided by the number of
-            singles in the beginning) is higher than this, then we should refresh the 'focus' array as it's not relevant anymore.
-            but in this case we don't relace the 'kind' of the representative (variable r). that is, if we used the one with the best-score,
-            we continue using the representatives with the second-best score.
-        :param rounds_before_refresh: integer, the number of rounds of working rate lower than 'low_work_rate' before refreshing.
+            singles in the beginning) should be higher than this constant. otherwise, little work was done consider 
+            replace the representatives (refresh the 'focus' array)
+        :param high_work_rate: float, if work done in a round (number of singles that were handles, divided by the 
+            number of singles in the beginning) is higher than this, then we should refresh the 'focus' array as it's
+            not relevant anymore. but in this case we don't relace the 'kind' of the representative (variable r). that 
+            is, if we used the one with the best-score,  we continue using the representatives with the second-best score
+        :param rounds_before_refresh: integer, number of rounds with working rate lower than 'low_work_rate' before 
+            refreshing
         """
         tot = time.time()
         debug_time = 0
@@ -482,12 +547,12 @@ class LSH:
         cnt_before_refresh = 0
         focus = list()
 
-        iters_num = math.ceil(len(self.all_reads) ** (1 / 2.2))
+        iters_num = max(math.ceil(len(self.all_reads) ** (1 / 2.2)), 300)
         print("-INFO: maximum iterations of the reduced LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
-            if itr > 0 and itr % 200 == 0 and self.accrcy:      # DEUBG PRINTS
+            if itr > 0 and itr % 200 == 0 and self.accrcy:  # DEUBG PRINTS
                 time_measure = time.time()
-                print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+                print(self.string_accrcy('old'))
                 debug_time += (time.time() - time_measure)
             time_start = time.time()
             sigs = list()
@@ -521,20 +586,18 @@ class LSH:
             sigs.sort(key=lambda x: x[1])
             for a in range(len(sigs) - 1):
                 if sigs[a][1] == sigs[a + 1][1]:
-                    sd = LSH.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
-                    if sd >= sd_high or (sd >= sd_low and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= distance_threshold):
+                    sd = LSHBasedCluster.sorensen_dice(self.numsets[sigs[a][0]], self.numsets[sigs[a + 1][0]])
+                    if sd >= sd_high or \
+                            (sd >= sd_low and distance(self.all_reads[sigs[a][0]], self.all_reads[sigs[a + 1][0]]) <= self.distance_threshold):
                         self.score[sigs[a][0]] += 1
                         self.score[sigs[a + 1][0]] += 1
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
 
             singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
             working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}".format(itr + 1,
-                                                                                            time.time() - time_start,
-                                                                                            working_rate, r,
-                                                                                            singles_round_start,
-                                                                                            singles_round_end,
-                                                                                            singles_round_start - singles_round_end))
+            print("-INFO: {} | {} s | rate: {} | r={} | first={} | end={} | diff={}"
+                  .format(itr + 1, time.time() - time_start, working_rate, r, singles_round_start,
+                          singles_round_end, singles_round_start - singles_round_end))
             bad_rounds = bad_rounds + 1 if (singles_round_start - singles_round_end) <= self.work_in_bad_round else 0
             if bad_rounds >= self.allowed_bad_rounds:
                 print("-INFO: enough bad rounds in a row, finish secondary LSH step.")
@@ -542,22 +605,31 @@ class LSH:
 
         success_rate = float(initial_singles - singles_round_end) / initial_singles if initial_singles != 0 else 0
         self.duration += time.time() - tot - debug_time
-        print("-INFO: time for a 'reduced clustering' stage: {}. Success rate: {}".format(time.time() - tot - debug_time, success_rate))
+        print(
+            "-INFO: time for a 'reduced clustering' stage: {}. Success rate: {}"
+                .format(time.time() - tot - debug_time, success_rate))
         return success_rate
 
-    def print_result(self):
+    def string_accrcy(self, metric):
         """
-        Prints the resulted clustering into a file.
+        Returns a string describing the accuracy of the clustring at the current state.
         """
-        if self.outfile is None:
-            return
-        print("=INFO: printing to {}".format(self.outfile))
-        with open(self.outfile, 'w') as f:
-            for cluster in self.C_til.values():
-                if len(cluster) == 0:
-                    continue
-                txt = ['<empty>', '*****************************'] + [self.all_reads[seq_idx] for seq_idx in cluster] + ['\n\n']         
-                f.write('\n'.join(txt))
+        if metric not in ['old', 'gamma', 'absolute']:
+            return "wrong metric"
+        clstrs = dict(filter(lambda elem: len(elem[1]) > 1, self.C_til.items()))
+        singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
+        size = len(clstrs) + len(singles)
+        if size == 0: return
+        res = ["Time: {}".format(self.duration), "Accuracy1 ({}):".format(metric),
+               "Clusters > 1: {}, Singles: {}".format(len(clstrs), len(singles))]
+        ac = Accrcy(metric)
+        try:
+            accrcy = {gamma: ac.calc(self.C_til, self.C_dict, self.C_reps, gamma, self.all_reads) / size
+                      for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
+            res.extend([("{}: {}".format(key, value)) for key, value in accrcy.items()])
+        except Exception:
+            res.append(traceback.format_exc())
+        return '\n'.join(res)
 
     def run(self, resonable_chunk=0.5):
         """
@@ -566,20 +638,15 @@ class LSH:
             in order to preform the clustering algorithm for this chunk.
         """
         self.chunk_partitioning()
-        '''
-        debug_time = time.time()
-        self.check_all_clusters_spread()
-        self.check_all_chunks_goodness()
-        self.duration -= (time.time() - debug_time)
-        '''
         lsh_cls_time = time.time()
         self.avg_chunk = mean(
             [len(self.chunks[idx]) for idx in range(len(self.all_reads)) if len(self.chunks[idx]) >= 1])
-        print("-INFO: average chunk size (threshold for basic clustring step): {}".format(self.avg_chunk))
+        print("-INFO: average chunk size (threshold for basic clustering step): {}".format(self.avg_chunk))
         print("-INFO: chunks to be analyzed: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if len(
             self.chunks[chunk_rep]) >= resonable_chunk * self.avg_chunk))))
-        print("-INFO: chunks to be ignored: {}".format(sum((1 for chunk_rep in range(len(self.chunks)) if
-                                                            len(self.chunks[chunk_rep]) > 0 and len(self.chunks[chunk_rep]) < resonable_chunk * self.avg_chunk))))
+        print("-INFO: chunks to be ignored: {}"
+              .format(sum((1 for chunk_rep in range(len(self.chunks)) if
+                           0 < len(self.chunks[chunk_rep]) < resonable_chunk * self.avg_chunk))))
         for chunk_rep in range(len(self.chunks)):
             if len(self.chunks[chunk_rep]) >= resonable_chunk * self.avg_chunk:
                 time_itr = time.time()
@@ -588,13 +655,13 @@ class LSH:
                 print("++++++++++++++++++++++++++++++++++++++++++++++++++")
         print("-INFO: time for work done in chunks: {}".format(time.time() - lsh_cls_time))
         if self.accrcy:
-            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+            print(self.string_accrcy('old'))
         print("-INFO: Final Clustering Step:")
         self.final_clustering()
         if self.accrcy:
-            print_accrcy(self.C_til, C_dict, C_reps, reads_err)
+            print(self.string_accrcy('old'))
         print("-INFO: Total time: {}".format(self.duration))
-        self.print_result()
+        return self.string_accrcy('old')
 
 
 # **********************************
@@ -633,12 +700,13 @@ class Accrcy:
             if len(clustering[i]) >= 1:
                 acrcy += self.comp_clstrs(clustering[i],
                                           C_dict[rep_in_C(reads_err[clustering[i][0]], C_reps)], gamma, reads_err)
-        print("-INFO: ACCRCY g={}: {} bad clusters due to false positives (there're {} false poisitives). {} due to not being sufficiently big enough. {} because they were too big"
-            .format(gamma, self.cnt_falsepos_mistake, self.cnt_falsepos, self.cnt_notsufficientlybig_mistake, self.cnt_toobig))
+        print("-INFO: ACCRCY g={}: {} bad clusters due to false positives (there're {} false positives)."
+              " {} due to not being sufficiently big enough. {} because they were too big"
+              .format(gamma, self.cnt_falsepos_mistake, self.cnt_falsepos, self.cnt_notsufficientlybig_mistake,
+                      self.cnt_toobig))
         return acrcy
 
     def comp_clstrs(self, alg_clstr, org_clstr, gamma, reads_err):
-        num_exist = 0
         true_positives = 0
         min_true = gamma * len(org_clstr)
         if self.metric.lower() == 'new':
@@ -681,115 +749,10 @@ class Accrcy:
         return 1
 
 
-def print_accrcy(C_til, C_dict, C_reps, reads_err):
-    clstrs = dict(filter(lambda elem: len(elem[1]) > 1, C_til.items()))
-    singles = [center for center, clstr in C_til.items() if len(clstr) == 1]
-    size = len(clstrs) + len(singles)
-    print("Clusters > 1: {}, Singles: {}".format(len(clstrs), len(singles)))
-    if size == 0: return
-    print("Accuracy1 (old):")
-    ac = Accrcy('old')
-    try:
-        accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
-                  for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
-        [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
-    except Exception:
-        print(traceback.format_exc())
-    print("*************************************************************")
-    print("Accuracy2 (1/gamma-1):")
-    ac = Accrcy('gamma')
-    try:
-        accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
-                  for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
-        [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
-    except Exception:
-        print(traceback.format_exc())
-    print("*************************************************************")
-    print("Accuracy3 (absolute):")
-    ac = Accrcy('new')
-    try:
-        accrcy = {gamma: ac.calc(C_til, C_dict, C_reps, gamma, reads_err) / size
-                  for gamma in [0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]}
-        [print("{}: {}".format(key, value)) for key, value in accrcy.items()]
-    except Exception:
-        print(traceback.format_exc())
-    print("*************************************************************")
-
-
-# **********************************
-#   Reading The Data
-# **********************************
-
-def handle_args():
-    parser = argparse.ArgumentParser(description='DNA strands clustering tool using LSH-based approach.')
-    parser.add_argument('-v', '--evyat', type=str, help="evyat file (as generated by the DNA simulator). "
-                                                        "useful for testing the tool's accuracy")
-    parser.add_argument('-s', '--errors_shuffled', type=str,
-                        help="errors_shuffled file (as generated by the DNA simulator)")
-    parser.add_argument('-o', '--out_file', type=str,
-                        help="destination for the result", default=None)
-    args = parser.parse_args()
-    oracle_mode = False if args.evyat is None else True
-    if oracle_mode:
-        if args.errors_shuffled:
-            print("-INFO: only evyat file will be used")
-        path = args.evyat
-    else:
-        if args.errors_shuffled:
-            path = args.errors_shuffled
-        else:
-            print("-ERR: cannot proceed without a path to the input file. exiting")
-            exit(1)
-    return oracle_mode, path, args.out_file
-
-
 if __name__ == '__main__':
-    reads_cl = []
-    oracle, dataset, out_file = handle_args()
-    with open(dataset) as file:
-        print("-INFO: using dataset: {}".format(dataset))
-        for line in file:
-            reads_cl.append(line.strip())
-    reads = []
-    for i in range(len(reads_cl)):
-        if reads_cl[i] != "":
-            if reads_cl[i][0] == "*":
-                rep = reads_cl[i - 1]
-                reads.append(rep)
-
-    # construct the setup for a run
-    # C_reps = [(Read, Cluster rep of the cluster to which the read belongs to)]
-    # C_dict = {Cluster rep: All the Reads that belong to that cluster}
-    C_reps = []
-    C_dict = {}
-    C_rev = {}
-    if oracle:
-        rep = reads_cl[0]
-        for i in range(1, len(reads_cl)):
-            if reads_cl[i] != "":
-                if reads_cl[i][0] == "*":
-                    if len(C_reps) > 0:
-                        C_dict[rep].pop()
-                        C_reps.pop()
-                    rep = reads_cl[i - 1]
-                    C_dict[rep] = []
-                else:
-                    C_dict[rep].append(reads_cl[i])
-                    C_reps.append((reads_cl[i], rep))
-        C_reps.sort(key=lambda x: x[0])
-        reads_err = [0] * (len(C_reps))
-        for i in range(len(C_reps)):
-            reads_err[i] = C_reps[i][0]
-    else:
-        reads_err = reads_cl
-    random.shuffle(reads_err)
-    for i in range(len(reads_err)):
-        C_rev[reads_err[i]] = i
-
-    # test the clustering algorithm
-    size = len([center for center, clstr in C_dict.items() if len(clstr) > 0])
-    singles_num = len([1 for _, clstr in C_dict.items() if len(clstr) == 1])
-    print("-INFO: input has: {} clusters. True size (neglecting empty clusters): {}".format(len(C_dict), size))
-    print("-INFO: out of them: {} are singles.".format(singles_num))
-    lsh = LSH(reads_err, q=6, k=3, m=40, L=32, accrcy=oracle, outfile=out_file)
-    lsh.run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-e', '--evyat', type=str, help='evyat path', required=True)
+    parser.add_argument('-l', '--log', type=str, help='evyat path', required=True)
+    args = parser.parse_args()
+    cluster = LSHBasedCluster(args.evyat, args.log)
+    print(cluster.run())
