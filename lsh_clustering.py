@@ -11,13 +11,13 @@ import traceback
 import queue
 import random
 import time
+import sys
 from datetime import datetime
 from statistics import mean
 import multiprocessing as mp
 import numpy as np
 from Levenshtein import distance
 from sklearn import metrics
-from sklearn.metrics import accuracy_score
 
 # from simulator import *
 
@@ -45,8 +45,10 @@ def timeit(func):
         return result
     return timed_op
 
+
 def info(str):
-    print(FORMAT.format(datetime.now(),inspect.stack()[1][3], str))
+    print(FORMAT.format(datetime.now(), inspect.stack()[1][3], str))
+    sys.stdout.flush()
 
 
 # **********************************
@@ -57,7 +59,7 @@ class LSHBasedCluster:
     def __init__(self, evyat_path,
                  chosen_technology='minion_idt',
                  q=6, k=3, m=40, L=32, distance_threshold=12,
-                 report_func=None):
+                 report_func=None, serial=True):
         """
         Initiate an object dedicated for clustering the DNA sequences
         :param chosen_technology: string, synthesizing technology used in generating the errors
@@ -67,6 +69,8 @@ class LSHBasedCluster:
         :param L: number of iterations of the algorithm
         :param distance_threshold: maximal edit distance between sequences for merging their clusters
             (in case the sorensen dice similarity was sufficient)
+        :param serial: boolean, determines whether to run the whole code serially. otherwise, will
+            generate the nubmer sets and the LSH signatures utilizing multiple cores.
         """
         self.L = L
         self.q = q
@@ -75,19 +79,21 @@ class LSHBasedCluster:
         self.top = 4 ** q  # upper boundary for items in numsets
         self.evyat_path = evyat_path
         self.distance_threshold = distance_threshold
-
+        self.chosen_technology = chosen_technology
+        
         self.all_reads = []
         self.original_strand_dict = {}  # map from orig strand id to the actual strand
         self.reads_err_original_strand_dict = {}  # map from read_err to it's orig strand id
         self.C_reps = []  # C_reps = [(Read, Cluster rep of the cluster to which the read belongs to)]
         self.C_dict = {}  # C_dict = {Cluster rep: All the Reads that belong to that cluster}
 
-        if platform.system() == "Linux":
+        if platform.system() == "Linux" and not serial:
             self.numsets, self.lsh_sigs = dict(), dict()
             self._numsets, self._lsh_sigs = self._numsets_mul, self._lsh_sigs_mul
             self.jobs = max(int(mp.cpu_count() * CPUS), 1)
-            info("cpu's: {}".format(self.jobs + 1))  # 1 for main thread
+            info("cpu's to be used: {}".format(self.jobs + 1))  # 1 for main thread
         else:
+            info("runs serially")
             self.numsets, self.lsh_sigs = list(), list()
             self._numsets, self._lsh_sigs = self._numsets_ser, self._lsh_sigs_ser
 
@@ -578,6 +584,7 @@ class LSHBasedCluster:
         """
         info("Stage: Final Clustering Step")
         time_st = time.time()
+        dbg_time = 0.0
         initial_singles = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
         singles_round_end = initial_singles
         r = -1
@@ -589,8 +596,10 @@ class LSHBasedCluster:
         iters_num = max(math.ceil(len(self.all_reads) ** (1 / 2.2)), min_rounds)
         info("maximum iterations of the full LSH clustring step: {}".format(iters_num))
         for itr in range(iters_num):
-            if itr > 0 and itr % 200 == 0:  # DEUBG PRINTS
-                print(self.results_str())
+            if itr > 0 and itr % 300 == 0:  # DEUBG PRINTS
+                st = time.time()
+                print(self.results_str(Accrcy))
+                dbg_time += time.time() - st
             time_itr = time.time()
             sigs = list()
             singles_round_start = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
@@ -632,18 +641,17 @@ class LSHBasedCluster:
                         self._add_pair(sigs[a][0], sigs[a + 1][0])
 
             singles_round_end = sum([1 for clstr in self.C_til.values() if len(clstr) == 1])
-            working_rate = float(singles_round_start - singles_round_end) / singles_round_start
-            info("{}: {}s , rate: {} , rep: {} , initially: {} , finally: {} , diff: {}"
+            working_rate = float(singles_round_start - singles_round_end) / singles_round_start if singles_round_start != 0 else 0
+            info("{}: {}s, rate: {}, rep: {}, initially: {}, finally: {}, diff: {}"
                   .format(itr + 1, time.time() - time_itr, working_rate, r, singles_round_start,
                           singles_round_end, singles_round_start - singles_round_end))
-            if itr >= min_rounds:
-                bad_rounds = bad_rounds + 1 if (singles_round_start - singles_round_end) <= self.work_in_bad_round else 0
-                if bad_rounds >= self.allowed_bad_rounds:
-                    info("enough bad rounds in a row, finish full LSH clustering step")
-                    break
-        info("time for final_clustring: {}".format(time.time() - time_st - self.debug_time))
+            bad_rounds = bad_rounds + 1 if (singles_round_start - singles_round_end) <= self.work_in_bad_round else 0
+            if bad_rounds >= self.allowed_bad_rounds and itr >= min_rounds:
+                info("enough bad rounds: {}. finish full LSH clustering step".format(bad_rounds))
+                break
+        info("time for final_clustring: {}".format(time.time() - time_st - dbg_time))
 
-    def results_str(self):
+    def results_str(self, metric=None):
         """
         Returns a string describing the accuracy of the clustring at the current state.
         """
@@ -652,7 +660,8 @@ class LSHBasedCluster:
         if size == 0: return
         singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
         res = ["Total Clusters: {}, Singles: {}".format(size, len(singles))]
-        metrics = [Accrcy, Purity, My_purity, NMI]
+        # metrics = [Accrcy, Purity, Avital, NMI] if metric is None else [metric]
+        metrics = [Accrcy, Avital, NMI] if metric is None else [metric]
         for met in metrics:
             res.append("Metric {}:".format(met.__qualname__))
             met_obj = met(self.C_til, self.C_dict, self.C_reps, size, self.all_reads)
@@ -702,7 +711,7 @@ class Metric:
         self.size = size
 
 
-class Purity (Metric):
+class Purity(Metric):
     @timeit
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
         """
@@ -718,15 +727,23 @@ class Purity (Metric):
                 label += 1
             return np.array(vec)
         super().__init__(C_til, C_dict, C_reps, size, all_reads)
-        self.true_vec = label_vec(C_dict)
+        self.true_vec = label_vec(C_dict)     
         self.pred_vec = label_vec(C_til)
 
     @timeit
     def print(self):
-        contingency_matrix = metrics.cluster.contingency_matrix(self.true_vec, self.pred_vec)
-        result = np.sum(np.amax(contingency_matrix, axis=0)) / np.sum(contingency_matrix)
-        return str(result)
-
+        y_voted_labels = np.zeros(self.true_vec.shape)
+        labels = np.unique(self.true_vec)
+        ordered_labels = np.arange(labels.shape[0])
+        for k in range(labels.shape[0]):
+            self.true_vec[self.true_vec == labels[k]] = ordered_labels[k]
+        labels = np.unique(self.true_vec)
+        bins = np.concatenate((labels, [np.max(labels) + 1]), axis=0)
+        for cluster in np.unique(self.pred_vec):
+            hist, _ = np.histogram(self.true_vec[self.pred_vec == cluster], bins=bins)
+            winner = np.argmax(hist)
+            y_voted_labels[self.pred_vec == cluster] = winner
+        return str(metrics.accuracy_score(self.true_vec, y_voted_labels))
 
 class Accrcy(Metric):
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
@@ -779,8 +796,61 @@ class Accrcy(Metric):
             return 0
         return 1
 
+class Avital(Metric):
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
+        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+
+    @timeit
+    def print(self):
+        cnt = self.cnt_falsepos()
+        return "False positives: {} (out of {}): {}".format(cnt, len(self.all_reads), 1.0 - (float(cnt) / len(self.all_reads)))
+
+    def cnt_falsepos(self):
+        cnt = 0
+        for rep in self.C_til.keys():
+            if len(self.C_til[rep]) == 0:
+                continue
+            true_clstr = self.C_dict[rep_in_C(self.all_reads[self.C_til[rep][0]], self.C_reps)]
+            pred_clstr = self.C_til[rep]
+            for i in range(0, len(pred_clstr)):
+                flg_exist = 0
+                for j in range(0, len(true_clstr)):
+                    if self.all_reads[pred_clstr[i]] == self.all_reads[true_clstr[j]]:
+                        flg_exist = 1
+                        break
+                if flg_exist == 0:
+                    cnt += 1
+        return cnt
 
 class NMI(Metric):
+    @timeit
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
+        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+        """
+        Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
+        """
+        def label_vec(clustering):
+            vec = []
+            label = 0
+            for cluster in clustering.values():
+                if len(cluster) == 0:
+                    continue
+                vec += [label] * len(cluster)
+                label += 1
+            return np.array(vec)
+        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+        self.true_vec = label_vec(C_dict)     
+        self.pred_vec = label_vec(C_til)
+
+    @timeit
+    def calc(self):
+        return metrics.cluster.normalized_mutual_info_score(self.true_vec, self.pred_vec)
+
+    def print(self):
+        return str(self.calc())
+
+
+class My_NMI(Metric):
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
         super().__init__(C_til, C_dict, C_reps, size, all_reads)
 
@@ -809,6 +879,7 @@ class NMI(Metric):
     def print(self):
         return str(self.calc())
 
+
 class My_purity(Metric):
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
         super().__init__(C_til, C_dict, C_reps, size, all_reads)
@@ -832,7 +903,6 @@ class My_purity(Metric):
 
     def print(self):
         return str(self.calc())
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
