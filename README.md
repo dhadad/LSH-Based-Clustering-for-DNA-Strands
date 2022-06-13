@@ -4,7 +4,7 @@
 An implementation for a DNA strands clustering algorithm, using LSH signatures. Ideas from previous works by [1], [2] are used throughout the algorithm's flow, altogether with several adjustments and new ideas. The algorithm aims to obtain a partition of a pool of DNA sequences into sets of similar strings, which are highly likely to orignate from the
 same line in the dataset, when the synthesis was preformed.
 
-## Input:
+## Input
 The tool receives an 'evyat.txt' text file, in the following format: 
 ```
 <original data string #1> 
@@ -33,9 +33,9 @@ TCATCATTGTTAAAATCTTGTAGTAGGCAGACGCTTCCTGGAAAACCCGTCCTGGGTATACACAACGGTTATGTACACTC
 The file consists of noisy copies generated from the original data. In other words, the sequences *after* the synthesis.
 For our purposes, as we aim to test the clustering result, the file is expeted to include the parition to clusters beforehand, so it can be later compared to our result, using different metrics.
 
-## Output:
+## Output
 After the clustering successfully finishes, the following output is printed to the standard output in the following structure:
-'''
+```
 Total time: 91.63022971153259
 Total Clusters: 5049, Singles: 317
 Metric Accrcy:
@@ -57,7 +57,7 @@ Metric NMI:
 0.9303673018393045
 Metric RandIndex:
 0.5803458414377837
-'''
+```
 Few metrics are used in order to evaulate the result.
 * Accuracy: defined in [1]
 * FalsePos: refer to [Sensitivity and specificity](https://en.wikipedia.org/wiki/Sensitivity_and_specificity)
