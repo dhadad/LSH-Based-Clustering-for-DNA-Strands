@@ -48,11 +48,11 @@ The log is printed to the standard output as a default.
 (Refers to [DNASimulator](https://github.com/gadihh/DNASimulator))\
 For possible future usages, if the tool is to be assimilated in the DNAsimulator, the needed files are attached in 'dna_simulator.zip' file. \
 Changes to the original DNAsimulator code:
-- Modified:
-	-\DNASimulator\dnaSimulator\app.py
-	-\DNASimulator\dnaSimulator\dnaSimulator_ui2.py
-- Added:
-	-\DNASimulator\dnaSimulator\lsh_based_clustering.py
+* Modified:
+	- \DNASimulator\dnaSimulator\app.py
+	- \DNASimulator\dnaSimulator\dnaSimulator_ui2.py
+* Added:
+	- \DNASimulator\dnaSimulator\lsh_based_clustering.py\
 Notes:
-Multiprocessing not supported in the Windows version
-Progress bar currently unreponsive.
+- Multiprocessing not supported in the Windows version
+- Progress bar currently unreponsive.
