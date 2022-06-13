@@ -8,9 +8,10 @@ same line in the dataset, when the synthesis was preformed.
 The tool receives an 'evyat.txt' text file, in the following format: 
 ```
 <original data string #1> 
-
+*****************************
 <erroneous copies of the above string>
-//two blank line
+
+(two blank line)
 <original data string #2> 
 etc...
 ```
@@ -40,18 +41,18 @@ lsh_based_clustering.py: error: the following arguments are required: -e/--evyat
 The log is printed to the standard output as a default.
 
 ## References
-[1] C. Rashtchian et al. “Clustering billions of reads for DNA data storage,” Advances in Neural Information Processing Systems, vol. 30, 2017.
-[2] P. L. Antkowiak, J. Lietard, M. Z. Darestani et al. ”Low cost DNA data storage using photolithographic synthesis and advanced information
-reconstruction and error correction,” Nature Communications, vol. 11, 2020.
+[1] C. Rashtchian et al. “Clustering billions of reads for DNA data storage,” Advances in Neural Information Processing Systems, vol. 30, 2017.\
+[2] P. L. Antkowiak, J. Lietard, M. Z. Darestani et al. ”Low cost DNA data storage using photolithographic synthesis and advanced information reconstruction and error correction,” Nature Communications, vol. 11, 2020.
 
 ## Note - DNAsimulator
-For possible future usages, if the tool is to be assimilated in the DNAsimulator, the needed files are attached in 'dna_simulator.zip' file.
+(Refers to [DNASimulator](https://github.com/gadihh/DNASimulator))\
+For possible future usages, if the tool is to be assimilated in the DNAsimulator, the needed files are attached in 'dna_simulator.zip' file. \
 Changes to the original DNAsimulator code:
-Modified:
-\DNASimulator\dnaSimulator\app.py
-\DNASimulator\dnaSimulator\dnaSimulator_ui2.py
-Added:
-\DNASimulator\dnaSimulator\lsh_based_clustering.py
+- Modified:
+	-\DNASimulator\dnaSimulator\app.py
+	-\DNASimulator\dnaSimulator\dnaSimulator_ui2.py
+- Added:
+	-\DNASimulator\dnaSimulator\lsh_based_clustering.py
 Notes:
 Multiprocessing not supported in the Windows version
 Progress bar currently unreponsive.
