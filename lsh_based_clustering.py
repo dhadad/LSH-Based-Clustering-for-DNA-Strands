@@ -45,12 +45,13 @@ def timeit(func):
     return timed_op
 
 
-def info(str):
+def info(str, enable=True):
     """
     Informative line for logging.
     """
-    print(FORMAT.format(datetime.now(), inspect.stack()[1][3], str))
-    sys.stdout.flush()
+    if enable:
+        print(FORMAT.format(datetime.now(), inspect.stack()[1][3], str))
+        sys.stdout.flush()
 
 
 # **********************************
@@ -61,7 +62,7 @@ class LSHBasedCluster:
     def __init__(self, evyat_path,
                  chosen_technology='minion_idt',
                  q=6, k=3, m=40, L=32, distance_threshold=12,
-                 report_func=None, serial=True):
+                 report_func=None, serial=True, export=True):
         """
         Initiate an object dedicated for clustering the DNA sequences
         :param chosen_technology: string, synthesizing technology used in generating the errors
@@ -73,16 +74,19 @@ class LSHBasedCluster:
             (in case the sorensen dice similarity was sufficient)
         :param serial: boolean, determines whether to run the whole code serially. otherwise, will
             generate the nubmer sets and the LSH signatures utilizing multiple cores.
+        :param export: boolean, determines whether to export the result as a evyat text file.
         """
         self.L = L
         self.q = q
         self.k = k
         self.m = m
         self.top = 4 ** q  # upper boundary for items in numsets
+        self.export = export
         self.evyat_path = evyat_path
         self.distance_threshold = distance_threshold
         self.chosen_technology = chosen_technology
-        
+        self.temp_evyat_path = self.evyat_path + ".result"
+
         self.all_reads = []
         self.original_strand_dict = {}  # map from orig strand id to the actual strand
         self.reads_err_original_strand_dict = {}  # map from read_err to it's orig strand id
@@ -665,10 +669,30 @@ class LSHBasedCluster:
         metrics = [Accrcy, FalsePos, NMI, RandIndex] if metric is None else [metric]
         for met in metrics:
             res.append("Metric {}:".format(met.__qualname__))
-            met_obj = met(self.C_til, self.C_dict, self.C_reps, size, self.all_reads)
+            met_obj = met(self.C_til, self.C_dict, self.C_reps, size, self.all_reads, self.parent)
             res.append(met_obj.print())
         self.debug_time += (time.time() - time_st)
         return '\n'.join(res)
+
+    def export_file(self):
+        """
+        Prints the result as a evyat.txt file format, to self.temp_evyat_path.
+        """
+        if self.export == False:
+            return
+        clusters = [sorted(x) for x in list(self.C_til.values()) if x != []]
+        with open(self.temp_evyat_path, 'w', newline='\n') as temp_f:
+            for cluster in clusters:
+                orig_strand_candidates = []
+                for cluster_element in cluster:
+                    orig_strand_candidates.append(self.reads_err_original_strand_dict.get(cluster_element))
+                orig_strand_id = max(orig_strand_candidates, key= orig_strand_candidates.count)
+                temp_f.write(str(self.original_strand_dict.get(orig_strand_id)) + '\n')
+                temp_f.write('*****************************\n')
+                for cluster_element in cluster:
+                    temp_f.write(self.read_err_dict.get(cluster_element) + '\n')
+                temp_f.write('\n\n')
+        info("Exported successfully to {}".format(self.temp_evyat_path))
 
     def run(self):
         """
@@ -683,6 +707,7 @@ class LSHBasedCluster:
         print(self.results_str())
         self.final_clustering()
         returned_val = '\n'.join(["Total time: {}".format(time.time() - time_init - self.debug_time), self.results_str()])
+        self.export_file()
         return returned_val
 
 
@@ -723,17 +748,17 @@ def label_vec(clustering):
     return np.array(vec)
 
 class Metric:
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
         self.C_til = C_til
         self.C_dict = C_dict
         self.C_reps = C_reps
-        self.all_reads = all_reads
         self.size = size
-
+        self.all_reads = all_reads
+        self.parent = parent
 
 class Purity(Metric):
     @timeit
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
         """
         Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
         """
@@ -766,8 +791,8 @@ class Purity(Metric):
         return str(metrics.accuracy_score(self.true_vec, y_voted_labels))
 
 class Accrcy(Metric):
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
+        super().__init__(C_til, C_dict, C_reps, size, all_reads, parent)
         self.cnt_notsufficientlybig_mistake = 0
         self.cnt_falsepos_mistake = 0
         self.cnt_falsepos = 0
@@ -824,14 +849,15 @@ class FalsePos(Metric):
     False negatives (FN) = for every "real" cluster, how many strands are missing.
     True positives (TP) = 1 - FN
     """
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
+        super().__init__(C_til, C_dict, C_reps, size, all_reads, parent)
 
     @timeit
     def print(self):
-        fp, tp = self.calc()
-        tn = len(self.all_reads) - fp   # true negatives
-        fn = len(self.all_reads) - tp
+        fp = self.false_positives()     # in our cluster, but shouldn't be there
+        fn = self.false_negatives()     # in the "true" cluster, but we don't have them in ours
+        tn = len(self.all_reads) - fp  
+        tp = len(self.all_reads) - fn
         strs = ['Total num. of strands: {}'.format(len(self.all_reads)), 
                 '(FP) False Positives: {}'.format(fp), 
                 '(TN) True Negatives: {}'.format(tn), 
@@ -840,8 +866,8 @@ class FalsePos(Metric):
                 '(TS) Threat Score / (CSI) Critical Success Index: {}'.format(float(tp) / (tp + fn + fp))]
         return '\n'.join(strs)
 
-    def calc(self):
-        fp, tp = 0, 0
+    def false_positives(self):
+        fp = 0
         for rep in self.C_til.keys():
             if len(self.C_til[rep]) == 0:
                 continue
@@ -852,32 +878,29 @@ class FalsePos(Metric):
                 for j in range(0, len(true_clstr)):
                     if self.all_reads[pred_clstr[i]] == self.all_reads[true_clstr[j]]:
                         flg_exist = 1
-                        tp += 1
                         break
                 if flg_exist == 0:
                     fp += 1
-        return fp, tp
+        return fp
 
     def false_negatives(self):
-        cnt = 0
-        for true_clstr in self.C_dict.values():
-            if len(true_clstr) == 0:
+        fn = 0
+        for rep in self.C_dict.keys():
+            if len(self.C_dict[rep]) == 0:
                 continue
-            rep = true_clstr[0]
-            pred_clstr = self.C_til[rep]
+            true_clstr = self.C_dict[rep]
+            pred_clstr = self.C_til[self.parent[true_clstr[0]]]
             for element in true_clstr:
-                if element not in pred_clstr:
-                    cnt += 1
-        return cnt
+                fn += 1 if element not in pred_clstr else 0
+        return fn
 
 class NMI(Metric):
     @timeit
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
         """
         Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
         """
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+        super().__init__(C_til, C_dict, C_reps, size, all_reads, parent)
         self.true_vec = label_vec(C_dict)     
         self.pred_vec = label_vec(C_til)
 
@@ -890,12 +913,11 @@ class NMI(Metric):
 
 class RandIndex(Metric):
     @timeit
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+    def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
         """
         Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
         """
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+        super().__init__(C_til, C_dict, C_reps, size, all_reads, parent)
         self.true_vec = label_vec(C_dict)     
         self.pred_vec = label_vec(C_til)
 
