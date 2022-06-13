@@ -18,7 +18,6 @@ import numpy as np
 from Levenshtein import distance
 from sklearn import metrics
 
-# from simulator import *
 
 # **********************************
 #   Globals & Auxiliary functions
