@@ -85,7 +85,7 @@ class LSHBasedCluster:
         self.evyat_path = evyat_path
         self.distance_threshold = distance_threshold
         self.chosen_technology = chosen_technology
-        self.temp_evyat_path = self.evyat_path + ".result"
+        self.temp_evyat_path = self.evyat_path + '_' + ''.join(random.choice(['a','b','c','d']) for i in range(7)) + ".result"
 
         self.all_reads = []
         self.original_strand_dict = {}  # map from orig strand id to the actual strand
@@ -761,6 +761,7 @@ class Purity(Metric):
     def __init__(self, C_til, C_dict, C_reps, size, all_reads, parent):
         """
         Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
+        https://gist.github.com/jhumigas/010473a456462106a3720ca953b2c4e2
         """
         def label_vec(clustering):
             vec = []
@@ -934,3 +935,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     cluster = LSHBasedCluster(args.evyat)
     print(cluster.run())
+

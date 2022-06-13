@@ -90,5 +90,5 @@ Changes to the original DNAsimulator code:
 	- \DNASimulator\dnaSimulator\lsh_based_clustering.py
 
 Notes:
-- Multiprocessing not supported in the Windows version
+- Multiprocessing is not supported in the Windows version
 - Progress bar is currently unreponsive.
