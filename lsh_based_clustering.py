@@ -7,7 +7,6 @@ import functools
 import math
 import platform
 import sklearn
-import traceback
 import queue
 import random
 import time
@@ -34,6 +33,7 @@ SLEEP_BEFORE_TRY = 0.03
 
 def timeit(func):
     """
+    Measure the time gap between initating a function and its termination.
     https://stackoverflow.com/questions/5478351/python-time-measure-function
     """
     @functools.wraps(func)
@@ -47,6 +47,9 @@ def timeit(func):
 
 
 def info(str):
+    """
+    Informative line for logging.
+    """
     print(FORMAT.format(datetime.now(), inspect.stack()[1][3], str))
     sys.stdout.flush()
 
@@ -660,8 +663,7 @@ class LSHBasedCluster:
         if size == 0: return
         singles = [center for center, clstr in self.C_til.items() if len(clstr) == 1]
         res = ["Total Clusters: {}, Singles: {}".format(size, len(singles))]
-        # metrics = [Accrcy, Purity, Avital, NMI] if metric is None else [metric]
-        metrics = [Accrcy, Avital, NMI] if metric is None else [metric]
+        metrics = [Accrcy, FalsePos, NMI, RandIndex] if metric is None else [metric]
         for met in metrics:
             res.append("Metric {}:".format(met.__qualname__))
             met_obj = met(self.C_til, self.C_dict, self.C_reps, size, self.all_reads)
@@ -672,12 +674,13 @@ class LSHBasedCluster:
     def run(self):
         """
         Preforms the whole algorithm flow.
+        :returns: a string, in the format printable by the DNAsimulator.
         """
         time_init = time.time()
         self.pre_step()
         self.chunk_partitioning()
         self.clustering_in_chunks()
-        info("prints current results")
+        info("(prints current results)")
         print(self.results_str())
         self.final_clustering()
         returned_val = '\n'.join(["Total time: {}".format(time.time() - time_init - self.debug_time), self.results_str()])
@@ -689,6 +692,10 @@ class LSHBasedCluster:
 # **********************************
 
 def rep_in_C(read, C_reps):
+    """
+    Given a sequence, finds the representative of its "real" cluster.
+    Needed by the MS Accuarcy computation.
+    """
     lower = 0
     upper = len(C_reps) - 1
     while lower <= upper:
@@ -701,6 +708,20 @@ def rep_in_C(read, C_reps):
             upper = mid - 1
     return -1
 
+def label_vec(clustering):
+    """
+    Creates a single vector representing the clustering.
+    Example: [0, 0, 1, 2] means 3 clusters, of sizes 2, 1, 1 respectively.
+    Needed for metrics whose implemntation uses the 'sklearn' library, s.a NMI, purity
+    """
+    vec = []
+    label = 0
+    for cluster in clustering.values():
+        if len(cluster) == 0:
+            continue
+        vec += [label] * len(cluster)
+        label += 1
+    return np.array(vec)
 
 class Metric:
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
@@ -796,17 +817,32 @@ class Accrcy(Metric):
             return 0
         return 1
 
-class Avital(Metric):
+class FalsePos(Metric):
+    """
+    Prints stats about the clustring: false positives, false negative, true positives and true negatives.
+    In this context, false positives (FP) refers to a sequence ending up in the wrong cluster.
+    True negatives (TN) = 1 - FP
+    False negatives (FN) = for every "real" cluster, how many strands are missing.
+    True positives (TP) = 1 - FN
+    """
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
         super().__init__(C_til, C_dict, C_reps, size, all_reads)
 
     @timeit
     def print(self):
-        cnt = self.cnt_falsepos()
-        return "False positives: {} (out of {}): {}".format(cnt, len(self.all_reads), 1.0 - (float(cnt) / len(self.all_reads)))
+        fp, tp = self.calc()
+        tn = len(self.all_reads) - fp   # true negatives
+        fn = len(self.all_reads) - tp
+        strs = ['Total num. of strands: {}'.format(len(self.all_reads)), 
+                '(FP) False Positives: {}'.format(fp), 
+                '(TN) True Negatives: {}'.format(tn), 
+                '(FN) False Negatives: {}'.format(fn), 
+                '(TP) True Positives: {}'.format(tp),
+                '(TS) Threat Score / (CSI) Critical Success Index: {}'.format(float(tp) / (tp + fn + fp))]
+        return '\n'.join(strs)
 
-    def cnt_falsepos(self):
-        cnt = 0
+    def calc(self):
+        fp, tp = 0, 0
         for rep in self.C_til.keys():
             if len(self.C_til[rep]) == 0:
                 continue
@@ -817,8 +853,21 @@ class Avital(Metric):
                 for j in range(0, len(true_clstr)):
                     if self.all_reads[pred_clstr[i]] == self.all_reads[true_clstr[j]]:
                         flg_exist = 1
+                        tp += 1
                         break
                 if flg_exist == 0:
+                    fp += 1
+        return fp, tp
+
+    def false_negatives(self):
+        cnt = 0
+        for true_clstr in self.C_dict.values():
+            if len(true_clstr) == 0:
+                continue
+            rep = true_clstr[0]
+            pred_clstr = self.C_til[rep]
+            for element in true_clstr:
+                if element not in pred_clstr:
                     cnt += 1
         return cnt
 
@@ -829,15 +878,6 @@ class NMI(Metric):
         """
         Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
         """
-        def label_vec(clustering):
-            vec = []
-            label = 0
-            for cluster in clustering.values():
-                if len(cluster) == 0:
-                    continue
-                vec += [label] * len(cluster)
-                label += 1
-            return np.array(vec)
         super().__init__(C_til, C_dict, C_reps, size, all_reads)
         self.true_vec = label_vec(C_dict)     
         self.pred_vec = label_vec(C_til)
@@ -849,57 +889,20 @@ class NMI(Metric):
     def print(self):
         return str(self.calc())
 
-
-class My_NMI(Metric):
+class RandIndex(Metric):
+    @timeit
     def __init__(self, C_til, C_dict, C_reps, size, all_reads):
         super().__init__(C_til, C_dict, C_reps, size, all_reads)
+        """
+        Generate arrays of cluster labels (both ground truth class labels, and pred cluster labels)
+        """
+        super().__init__(C_til, C_dict, C_reps, size, all_reads)
+        self.true_vec = label_vec(C_dict)     
+        self.pred_vec = label_vec(C_til)
 
     @timeit
     def calc(self):
-        def ho(clustering, n):
-            s = 0
-            for clstr in clustering.values():
-                if len(clstr) > 0:
-                    frac = float(len(clstr)) / n
-                    s += frac * math.log(frac)
-            return -s
-        ilo = 0
-        n = len(self.all_reads)
-        for true_clstr in self.C_dict.values():
-            for pred_clstr in self.C_til.values():
-                if len(pred_clstr) * len(true_clstr) == 0:
-                    continue
-                set_1, set_2 = set(true_clstr), set(pred_clstr)
-                intersect = float(len(set_1.intersection(set_2)))
-                if intersect == 0.0:
-                    continue
-                ilo += (intersect / n) * math.log(intersect * n / (len(true_clstr) * len(pred_clstr)))
-        return 2 * ilo / (ho(self.C_dict, n) + ho(self.C_til, n))
-
-    def print(self):
-        return str(self.calc())
-
-
-class My_purity(Metric):
-    def __init__(self, C_til, C_dict, C_reps, size, all_reads):
-        super().__init__(C_til, C_dict, C_reps, size, all_reads)
-
-    @timeit
-    def calc(self):
-        s = 0
-        n = len(self.all_reads)
-        for true_clstr in self.C_dict.values():
-            best = 0
-            for pred_clstr in self.C_til.values():
-                if len(pred_clstr) * len(true_clstr) == 0:
-                    continue
-                set_1, set_2 = set(true_clstr), set(pred_clstr)
-                intersect = len(set_1.intersection(set_2))
-                if intersect == 0.0:
-                    continue
-                best = max(best, intersect)
-            s += best
-        return float(s) / n
+        return metrics.cluster.adjusted_rand_score(self.true_vec, self.pred_vec)
 
     def print(self):
         return str(self.calc())
